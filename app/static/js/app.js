@@ -10,6 +10,7 @@ import { renderLibrary } from "./views/library.js";
 import { renderEntity } from "./views/entity.js";
 import { renderTimeline } from "./views/timeline.js";
 import { renderFlashcards } from "./views/flashcards.js";
+import { renderQuiz } from "./views/quiz.js";
 
 const view = () => document.getElementById("view");
 
@@ -67,7 +68,7 @@ route("/library", ({ root, query }) => renderLibrary(root, { query }));
 route("/entity/:id", ({ root, params }) => renderEntity(root, { params }));
 route("/timeline", ({ root, query }) => renderTimeline(root, { query }));
 route("/flashcards", ({ root }) => renderFlashcards(root));
-route("/quiz", stub("Quiz"));
+route("/quiz", ({ root }) => renderQuiz(root));
 route("/settings", stub("Settings"));
 
 bindShell();
