@@ -1,7 +1,7 @@
 /** Dashboard — streak, XP ring, review CTA, weakest topics. */
 
 import { api } from "../api.js";
-import { escapeHtml, formatRange, typeLabel, toast } from "../util.js";
+import { escapeHtml, formatDate, typeLabel } from "../util.js";
 import { syncProgressChrome } from "../progress-ui.js";
 
 function goalRing(progress) {
@@ -68,19 +68,17 @@ export async function renderHome(root) {
             ? `<div class="rounded-2xl border border-dashed border-paper-line p-6 text-sm text-ink-muted text-center">
                 Empty for now.
                 <div class="mt-4 flex flex-wrap justify-center gap-2">
-                  <button type="button" id="home-seed" class="btn-secondary px-4 py-2">Load sample set</button>
                   <button type="button" id="home-add" class="btn-primary px-4 py-2">+ Add entry</button>
                 </div>
               </div>`
             : `<div class="space-y-2">
                 ${data.recent
                   .map((e) => {
-                    const range = formatRange(e.date_start, e.date_end);
+                    const range = formatDate(e.date_start);
                     return `<a href="#/entity/${e.id}" class="entity-row no-underline text-inherit">
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 flex-wrap">
                           <span class="font-medium">${escapeHtml(e.title)}</span>
-                          <span class="type-badge">${typeLabel(e.type)}</span>
                           ${range ? `<span class="text-xs text-ink-faint">${escapeHtml(range)}</span>` : ""}
                         </div>
                       </div>
@@ -123,18 +121,6 @@ export async function renderHome(root) {
     </div>
   `;
 
-  const seedBtn = document.getElementById("home-seed");
-  if (seedBtn) {
-    seedBtn.addEventListener("click", async () => {
-      try {
-        const res = await api.seed();
-        toast(`Loaded ${res.created} sample entries`);
-        location.hash = "/library";
-      } catch (err) {
-        toast(err.message || "Could not load samples");
-      }
-    });
-  }
   const addBtn = document.getElementById("home-add");
   if (addBtn) {
     addBtn.addEventListener("click", () => {

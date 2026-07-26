@@ -7,6 +7,7 @@ const TYPE_LABELS = {
   period: "Period",
   milestone: "Milestone",
   timeline: "Timeline",
+  topic: "Topic",
 };
 
 export function typeLabel(t) {
@@ -21,15 +22,48 @@ export function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/** Build stored date string from form parts. era: "bc" | "ac" */
+export function composeDate(year, month, day, era = "ac") {
+  if (year == null || String(year).trim() === "") return null;
+  let y = parseInt(String(year).trim(), 10);
+  if (Number.isNaN(y)) return null;
+  y = Math.abs(y);
+
+  let m = null;
+  let d = null;
+  if (month != null && String(month).trim() !== "") {
+    m = Math.min(Math.max(parseInt(String(month).trim(), 10), 1), 12);
+    if (Number.isNaN(m)) m = null;
+  }
+  if (m != null && day != null && String(day).trim() !== "") {
+    d = Math.min(Math.max(parseInt(String(day).trim(), 10), 1), 31);
+    if (Number.isNaN(d)) d = null;
+  }
+
+  const isBc = String(era || "ac").toLowerCase() === "bc";
+  const yearPart = isBc ? `-${String(y).padStart(4, "0")}` : String(y);
+  if (m == null) return yearPart;
+  if (d == null) return `${yearPart}-${String(m).padStart(2, "0")}`;
+  return `${yearPart}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
 export function parseDate(value) {
   if (!value) return null;
   const raw = String(value).trim();
   if (!raw) return null;
   const upper = raw.toUpperCase().replace(/\s+/g, "");
-  if (upper.endsWith("BCE") || upper.endsWith("BC")) {
+  if (
+    upper.endsWith("BCE") ||
+    upper.endsWith("BC") ||
+    upper.endsWith("AC") ||
+    upper.endsWith("CE") ||
+    upper.endsWith("AD")
+  ) {
     const digits = upper.replace(/\D/g, "");
     if (!digits) return null;
-    return { year: -parseInt(digits, 10), month: 1, day: 1 };
+    const y = parseInt(digits, 10);
+    const neg = upper.endsWith("BCE") || upper.endsWith("BC");
+    return { year: neg ? -y : y, month: 1, day: 1 };
   }
   const neg = raw.startsWith("-");
   const body = neg ? raw.slice(1) : raw;
@@ -53,9 +87,18 @@ export function dateSortKey(value) {
 }
 
 export function formatDate(value) {
+  if (!value || !String(value).trim()) return "";
   const p = parseDate(value);
   if (!p) return "";
-  return p.year < 0 ? `${Math.abs(p.year)} BCE` : String(p.year);
+  const absYear = Math.abs(p.year);
+  const era = p.year < 0 ? "BC" : "AC";
+  const body = String(value).replace(/^-/, "");
+  const parts = body.split("-");
+  const hasMonth = parts.length >= 2 && /^\d+$/.test(parts[1]);
+  const hasDay = parts.length >= 3 && /^\d+$/.test(parts[2]);
+  if (hasDay && hasMonth) return `${parseInt(parts[2], 10)}/${parseInt(parts[1], 10)}/${absYear} ${era}`;
+  if (hasMonth) return `${parseInt(parts[1], 10)}/${absYear} ${era}`;
+  return `${absYear} ${era}`;
 }
 
 export function formatRange(start, end) {
@@ -63,6 +106,13 @@ export function formatRange(start, end) {
   const b = formatDate(end);
   if (a && b) return `${a} – ${b}`;
   return a || b || "";
+}
+
+export function normalizeTag(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^#+/, "")
+    .trim();
 }
 
 export function toast(message, ms = 2600) {
@@ -79,7 +129,6 @@ export function fuzzyScore(query, text) {
   const q = query.toLowerCase();
   const t = (text || "").toLowerCase();
   if (t.includes(q)) return 2 + (t.startsWith(q) ? 1 : 0);
-  // subsequence
   let qi = 0;
   for (let i = 0; i < t.length && qi < q.length; i++) {
     if (t[i] === q[qi]) qi++;
@@ -89,7 +138,12 @@ export function fuzzyScore(query, text) {
 
 export function entityMatches(entity, query) {
   if (!query) return true;
-  const hay = [entity.title, entity.summary || "", ...(entity.tags || [])].join(" ");
+  const hay = [
+    entity.title,
+    entity.summary || "",
+    entity.place_name || "",
+    ...(entity.tags || []),
+  ].join(" ");
   return fuzzyScore(query, hay) > 0;
 }
 

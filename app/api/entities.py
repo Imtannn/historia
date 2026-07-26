@@ -23,7 +23,12 @@ router = APIRouter(prefix="/entities", tags=["entities"])
 
 
 def _entity_read(e: Entity) -> EntityRead:
-    return EntityRead.model_validate(e)
+    data = e.model_dump()
+    if data.get("tags") is None:
+        data["tags"] = []
+    if data.get("attachments") is None:
+        data["attachments"] = []
+    return EntityRead.model_validate(data)
 
 
 @router.get("", response_model=list[EntityRead])
@@ -70,6 +75,10 @@ def get_entity(entity_id: str, session: Session = Depends(get_session)) -> Entit
 @router.post("", response_model=EntityRead, status_code=201)
 def create_entity(payload: EntityCreate, session: Session = Depends(get_session)) -> EntityRead:
     data = payload.model_dump(exclude={"link_ids", "link_relation", "id"})
+    if data.get("tags") is None:
+        data["tags"] = []
+    if data.get("attachments") is None:
+        data["attachments"] = []
     entity = Entity(**data)
     if payload.id:
         entity.id = payload.id

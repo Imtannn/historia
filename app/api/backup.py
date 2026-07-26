@@ -25,8 +25,17 @@ from app.models import (
 router = APIRouter(tags=["backup"])
 
 
+def _entity_read(e: Entity) -> EntityRead:
+    data = e.model_dump()
+    if data.get("tags") is None:
+        data["tags"] = []
+    if data.get("attachments") is None:
+        data["attachments"] = []
+    return EntityRead.model_validate(data)
+
+
 def _dump(session: Session) -> ExportPayload:
-    entities = [EntityRead.model_validate(e) for e in session.exec(select(Entity)).all()]
+    entities = [_entity_read(e) for e in session.exec(select(Entity)).all()]
     links = [LinkRead.model_validate(l) for l in session.exec(select(Link)).all()]
     reviews = [ReviewStateRead.model_validate(r) for r in session.exec(select(ReviewState)).all()]
     progress = session.get(Progress, 1) or Progress(id=1)

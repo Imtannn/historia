@@ -1,18 +1,17 @@
-/** Quick-add / edit entity modal. */
+/** Short Add Event modal — title, flexible date + BC/AC, @links, tags, place, file links. */
 
 import { api } from "./api.js";
-import { escapeHtml, toast, typeLabel } from "./util.js";
+import { composeDate, escapeHtml, normalizeTag, toast } from "./util.js";
 
-const TYPES = ["event", "place", "figure", "period", "milestone", "timeline"];
-const RELATIONS = ["occurred_in", "involves", "part_of", "preceded_by", "related_to"];
-
-let allEntities = [];
-let selectedLinks = new Map(); // id -> entity
+let allEvents = [];
+let selectedLinks = new Map(); // id -> event
+let attachments = [];
 
 function closeModal() {
   document.getElementById("modal-root").classList.add("hidden");
   document.getElementById("modal-panel").innerHTML = "";
   selectedLinks = new Map();
+  attachments = [];
 }
 
 function openModal() {
@@ -23,14 +22,14 @@ function renderLinkChips() {
   const box = document.getElementById("link-chips");
   if (!box) return;
   if (selectedLinks.size === 0) {
-    box.innerHTML = `<span class="text-xs text-ink-faint">No links yet</span>`;
+    box.innerHTML = `<span class="text-xs text-ink-faint">No related events yet</span>`;
     return;
   }
   box.innerHTML = [...selectedLinks.values()]
     .map(
       (e) => `
       <button type="button" data-unlink="${e.id}" class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-accent-soft text-accent-dark text-xs font-medium">
-        ${escapeHtml(e.title)}
+        @${escapeHtml(e.title)}
         <span aria-hidden="true">×</span>
       </button>`
     )
@@ -43,149 +42,267 @@ function renderLinkChips() {
   });
 }
 
-function renderSearchResults(query) {
-  const box = document.getElementById("link-results");
+function renderAtResults(query) {
+  const box = document.getElementById("at-results");
   if (!box) return;
-  const q = (query || "").toLowerCase().trim();
+  let q = (query || "").trim();
+  if (q.startsWith("@")) q = q.slice(1);
+  q = q.toLowerCase();
   if (!q) {
     box.innerHTML = "";
     return;
   }
-  const hits = allEntities
+  const hits = allEvents
     .filter((e) => !selectedLinks.has(e.id))
-    .filter(
-      (e) =>
-        e.title.toLowerCase().includes(q) ||
-        (e.summary || "").toLowerCase().includes(q) ||
-        (e.tags || []).some((t) => t.toLowerCase().includes(q))
-    )
+    .filter((e) => e.title.toLowerCase().includes(q) || (e.summary || "").toLowerCase().includes(q))
     .slice(0, 8);
   if (!hits.length) {
-    box.innerHTML = `<p class="text-xs text-ink-faint px-1 py-2">No matches</p>`;
+    box.innerHTML = `<p class="text-xs text-ink-faint px-1 py-2">No matching events</p>`;
     return;
   }
   box.innerHTML = hits
     .map(
       (e) => `
-    <button type="button" data-pick="${e.id}" class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex justify-between gap-2">
-      <span>${escapeHtml(e.title)}</span>
-      <span class="type-badge shrink-0">${typeLabel(e.type)}</span>
+    <button type="button" data-pick="${e.id}" class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm">
+      @${escapeHtml(e.title)}
     </button>`
     )
     .join("");
   box.querySelectorAll("[data-pick]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const ent = allEntities.find((x) => x.id === btn.dataset.pick);
+      const ent = allEvents.find((x) => x.id === btn.dataset.pick);
       if (ent) {
         selectedLinks.set(ent.id, ent);
-        document.getElementById("link-search").value = "";
+        const input = document.getElementById("at-search");
+        if (input) input.value = "";
         renderLinkChips();
-        renderSearchResults("");
+        renderAtResults("");
       }
     });
   });
 }
 
+function renderAttachments() {
+  const box = document.getElementById("file-list");
+  if (!box) return;
+  if (!attachments.length) {
+    box.innerHTML = `<span class="text-xs text-ink-faint">No file links yet</span>`;
+    return;
+  }
+  box.innerHTML = attachments
+    .map(
+      (url, i) => `
+      <div class="flex items-center gap-2 text-sm">
+        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline truncate flex-1">${escapeHtml(url)}</a>
+        <button type="button" data-rm-file="${i}" class="btn-ghost text-xs px-2 py-0.5">Remove</button>
+      </div>`
+    )
+    .join("");
+  box.querySelectorAll("[data-rm-file]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      attachments.splice(parseInt(btn.dataset.rmFile, 10), 1);
+      renderAttachments();
+    });
+  });
+}
+
+function renderTagChips(tags) {
+  const box = document.getElementById("tag-chips");
+  if (!box) return;
+  if (!tags.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = tags
+    .map(
+      (t, i) => `
+      <button type="button" data-rm-tag="${i}" class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-paper-deep text-ink-muted text-xs">
+        #${escapeHtml(t)}
+        <span aria-hidden="true">×</span>
+      </button>`
+    )
+    .join("");
+  box.querySelectorAll("[data-rm-tag]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tags.splice(parseInt(btn.dataset.rmTag, 10), 1);
+      renderTagChips(tags);
+    });
+  });
+}
+
 export async function openQuickAdd({ onSaved } = {}) {
-  allEntities = await api.listEntities();
+  const entities = await api.listEntities({ type: "event" });
+  allEvents = entities;
   selectedLinks = new Map();
+  attachments = [];
+  const tags = [];
+
   const panel = document.getElementById("modal-panel");
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">Add entry</h2>
-        <p class="text-sm text-ink-muted mt-0.5">One place for any type of history note.</p>
+        <h2 class="font-display text-xl">Add event</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Only a title is required — everything else is optional.</p>
       </div>
       <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
     </div>
     <form id="quick-add-form" class="space-y-4">
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="label" for="qa-type">Type</label>
-          <select id="qa-type" class="select" required>
-            ${TYPES.map((t) => `<option value="${t}">${typeLabel(t)}</option>`).join("")}
-          </select>
-        </div>
-        <div>
-          <label class="label" for="qa-relation">Link as</label>
-          <select id="qa-relation" class="select">
-            ${RELATIONS.map((r) => `<option value="${r}">${r.replace(/_/g, " ")}</option>`).join("")}
-          </select>
-        </div>
-      </div>
       <div>
         <label class="label" for="qa-title">Title</label>
-        <input id="qa-title" class="input" required maxlength="500" placeholder="e.g. Battle of Waterloo" />
+        <input id="qa-title" class="input" required maxlength="500" placeholder="What happened?" autofocus />
       </div>
+
       <div>
-        <label class="label" for="qa-summary">Summary</label>
-        <input id="qa-summary" class="input" maxlength="2000" placeholder="Short description for cards" />
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="label" for="qa-start">Start date</label>
-          <input id="qa-start" class="input" placeholder="1815 or -0044" />
+        <label class="label">Date <span class="font-normal text-ink-faint">(optional)</span></label>
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <div>
+            <input id="qa-day" class="input" type="number" min="1" max="31" placeholder="Day" />
+          </div>
+          <div>
+            <input id="qa-month" class="input" type="number" min="1" max="12" placeholder="Month" />
+          </div>
+          <div>
+            <input id="qa-year" class="input" type="number" placeholder="Year" />
+          </div>
         </div>
-        <div>
-          <label class="label" for="qa-end">End date</label>
-          <input id="qa-end" class="input" placeholder="optional" />
+        <div class="flex gap-2">
+          <label class="flex-1 flex items-center justify-center gap-2 rounded-lg border border-paper-line px-3 py-2 text-sm cursor-pointer has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
+            <input type="radio" name="qa-era" value="ac" checked class="accent-accent" />
+            AC
+          </label>
+          <label class="flex-1 flex items-center justify-center gap-2 rounded-lg border border-paper-line px-3 py-2 text-sm cursor-pointer has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
+            <input type="radio" name="qa-era" value="bc" class="accent-accent" />
+            BC
+          </label>
         </div>
+        <p class="text-[11px] text-ink-faint mt-1.5">Year alone is fine. Day/month optional. Board sorts by date automatically.</p>
       </div>
+
       <div>
-        <label class="label" for="qa-tags">Tags</label>
-        <input id="qa-tags" class="input" placeholder="comma-separated, e.g. europe, war" />
+        <label class="label" for="qa-note">Note <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="qa-note" class="textarea" placeholder="Short note about this event…"></textarea>
       </div>
+
       <div>
-        <label class="label" for="qa-parent">Parent (optional)</label>
-        <select id="qa-parent" class="select">
-          <option value="">— none —</option>
-          ${allEntities
-            .map((e) => `<option value="${e.id}">${escapeHtml(e.title)} (${typeLabel(e.type)})</option>`)
-            .join("")}
-        </select>
-      </div>
-      <div>
-        <label class="label" for="link-search">Link to existing</label>
-        <input id="link-search" class="input" placeholder="Search entities…" autocomplete="off" />
-        <div id="link-results" class="mt-1 max-h-36 overflow-y-auto"></div>
+        <label class="label" for="at-search">Related (@) <span class="font-normal text-ink-faint">(optional)</span></label>
+        <input id="at-search" class="input" placeholder="Type @ or search to link events…" autocomplete="off" />
+        <div id="at-results" class="mt-1 max-h-28 overflow-y-auto"></div>
         <div id="link-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
       </div>
+
       <div>
-        <label class="label" for="qa-body">Notes (markdown)</label>
-        <textarea id="qa-body" class="textarea" placeholder="Longer notes…"></textarea>
+        <label class="label" for="tag-input">Tags <span class="font-normal text-ink-faint">(optional)</span></label>
+        <div class="flex gap-2">
+          <input id="tag-input" class="input flex-1" placeholder="#europe or europe — Enter to add" />
+          <button type="button" id="tag-add" class="btn-secondary px-3">Add</button>
+        </div>
+        <div id="tag-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
       </div>
-      <div class="flex justify-end gap-2 pt-2">
+
+      <div>
+        <label class="label">Place <span class="font-normal text-ink-faint">(optional)</span></label>
+        <div class="space-y-2">
+          <input id="qa-place-name" class="input" placeholder="Location name" maxlength="500" />
+          <input id="qa-place-url" class="input" placeholder="Google Earth / map URL" maxlength="2000" />
+        </div>
+      </div>
+
+      <div>
+        <label class="label">Files <span class="font-normal text-ink-faint">(links / paths — optional)</span></label>
+        <div class="flex gap-2">
+          <input id="file-input" class="input flex-1" placeholder="Paste a URL or file path" />
+          <button type="button" id="file-add" class="btn-secondary px-3">Add</button>
+        </div>
+        <div id="file-list" class="mt-2 space-y-1"></div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-1">
         <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
-        <button type="submit" class="btn-primary px-4 py-2">Save</button>
+        <button type="submit" class="btn-primary px-4 py-2">Save event</button>
       </div>
     </form>
   `;
-  renderLinkChips();
-  openModal();
 
-  document.getElementById("link-search").addEventListener("input", (e) => {
-    renderSearchResults(e.target.value);
+  renderLinkChips();
+  renderAttachments();
+  renderTagChips(tags);
+  openModal();
+  queueMicrotask(() => document.getElementById("qa-title")?.focus());
+
+  const atSearch = document.getElementById("at-search");
+  atSearch.addEventListener("input", (e) => renderAtResults(e.target.value));
+  atSearch.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const first = document.querySelector("#at-results [data-pick]");
+      if (first) first.click();
+    }
+  });
+
+  function addTag() {
+    const raw = document.getElementById("tag-input").value;
+    const t = normalizeTag(raw);
+    if (!t) return;
+    if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+    document.getElementById("tag-input").value = "";
+    renderTagChips(tags);
+  }
+  document.getElementById("tag-add").addEventListener("click", addTag);
+  document.getElementById("tag-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addTag();
+    }
+  });
+
+  function addFile() {
+    const url = document.getElementById("file-input").value.trim();
+    if (!url) return;
+    if (!attachments.includes(url)) attachments.push(url);
+    document.getElementById("file-input").value = "";
+    renderAttachments();
+  }
+  document.getElementById("file-add").addEventListener("click", addFile);
+  document.getElementById("file-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addFile();
+    }
   });
 
   document.getElementById("quick-add-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const tags = document
-      .getElementById("qa-tags")
-      .value.split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+    const year = document.getElementById("qa-year").value;
+    const month = document.getElementById("qa-month").value;
+    const day = document.getElementById("qa-day").value;
+    const era = document.querySelector('input[name="qa-era"]:checked')?.value || "ac";
+
+    if ((month || day) && !String(year).trim()) {
+      toast("Add a year if you set month or day");
+      return;
+    }
+
+    const date_start = composeDate(year, month, day, era);
+    const note = document.getElementById("qa-note").value.trim();
+    const placeName = document.getElementById("qa-place-name").value.trim();
+    const placeUrl = document.getElementById("qa-place-url").value.trim();
+
     const body = {
-      type: document.getElementById("qa-type").value,
+      type: "event",
       title: document.getElementById("qa-title").value.trim(),
-      summary: document.getElementById("qa-summary").value.trim() || null,
-      body: document.getElementById("qa-body").value.trim() || null,
-      date_start: document.getElementById("qa-start").value.trim() || null,
-      date_end: document.getElementById("qa-end").value.trim() || null,
-      parent_id: document.getElementById("qa-parent").value || null,
-      tags,
+      summary: note || null,
+      body: null,
+      date_start,
+      date_end: null,
+      parent_id: null,
+      tags: [...tags],
+      place_name: placeName || null,
+      place_url: placeUrl || null,
+      attachments: [...attachments],
       link_ids: [...selectedLinks.keys()],
-      link_relation: document.getElementById("qa-relation").value,
+      link_relation: "related_to",
     };
+
     try {
       const created = await api.createEntity(body);
       toast(`Added “${created.title}”`);

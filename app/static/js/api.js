@@ -67,4 +67,5 @@ export const api = {
     const s = q.toString();
     return request(`/timeline${s ? `?${s}` : ""}`);
   },
+  createTopic: (body) => request("/topics", { method: "POST", body: JSON.stringify(body) }),
 };

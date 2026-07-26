@@ -97,6 +97,14 @@ def generate_flashcard(session: Session, entity: Entity) -> Optional[dict[str, A
                 "kind": "when",
                 "xp": XP_FLASHCARD,
             }
+        if entity.place_name:
+            return {
+                "entity_id": entity.id,
+                "prompt": f"Where did {entity.title} occur?",
+                "answer": entity.place_name,
+                "kind": "where",
+                "xp": XP_FLASHCARD,
+            }
         place = _first_linked(session, entity, RelationType.occurred_in, EntityType.place)
         if place:
             return {
@@ -114,6 +122,9 @@ def generate_flashcard(session: Session, entity: Entity) -> Optional[dict[str, A
                 "kind": "what",
                 "xp": XP_FLASHCARD,
             }
+
+    if t == EntityType.topic:
+        return None
 
     if t == EntityType.figure:
         place = _first_linked(session, entity, RelationType.involves, EntityType.place)
@@ -196,6 +207,12 @@ def list_flashcards(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     entities = _filter_entities(session, type=type, tag=tag, place_id=place_id)
+    # Event-first: skip topics (and prefer events when unfiltered)
+    entities = [e for e in entities if e.type != EntityType.topic]
+    if type is None:
+        events = [e for e in entities if e.type == EntityType.event]
+        if events:
+            entities = events
     # Prefer lower mastery
     mastery = {
         r.entity_id: r.mastery
@@ -294,6 +311,15 @@ def _typein_for_entity(session: Session, entity: Entity) -> Optional[dict]:
                 "xp": XP_TYPEIN,
             }
     if entity.type == EntityType.event:
+        if entity.place_name:
+            return {
+                "type": "typein",
+                "entity_id": entity.id,
+                "prompt": f"Where did {entity.title} take place?",
+                "answer": entity.place_name,
+                "hint": "Place name",
+                "xp": XP_TYPEIN,
+            }
         place = _first_linked(session, entity, RelationType.occurred_in, EntityType.place)
         if place:
             return {
@@ -308,15 +334,18 @@ def _typein_for_entity(session: Session, entity: Entity) -> Optional[dict]:
 
 
 def _match_set(session: Session, pool: list[Entity], rng: random.Random, n: int = 4) -> Optional[dict]:
-    """Match events→places or figures→places."""
+    """Match events → place_name (or linked places)."""
     pairs: list[tuple[str, str, str]] = []  # prompt, answer, entity_id
 
     events = [e for e in pool if e.type == EntityType.event]
     rng.shuffle(events)
     for e in events:
-        place = _first_linked(session, e, RelationType.occurred_in, EntityType.place)
-        if place:
-            pairs.append((e.title, place.title, e.id))
+        if e.place_name:
+            pairs.append((e.title, e.place_name, e.id))
+        else:
+            place = _first_linked(session, e, RelationType.occurred_in, EntityType.place)
+            if place:
+                pairs.append((e.title, place.title, e.id))
         if len(pairs) >= n:
             break
 
@@ -340,7 +369,7 @@ def _match_set(session: Session, pool: list[Entity], rng: random.Random, n: int 
     rng.shuffle(answers)
     return {
         "type": "match",
-        "entity_id": pairs[0][2],  # primary for review attribution
+        "entity_id": pairs[0][2],
         "entity_ids": [p[2] for p in pairs],
         "prompt": "Match each item to its place",
         "left": prompts,

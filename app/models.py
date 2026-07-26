@@ -26,6 +26,7 @@ class EntityType(str, Enum):
     period = "period"
     milestone = "milestone"
     timeline = "timeline"
+    topic = "topic"
 
 
 class RelationType(str, Enum):
@@ -48,6 +49,9 @@ class EntityBase(SQLModel):
     date_end: Optional[str] = Field(default=None, max_length=32)
     parent_id: Optional[str] = Field(default=None, foreign_key="entity.id", index=True)
     tags: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    place_name: Optional[str] = Field(default=None, max_length=500)
+    place_url: Optional[str] = Field(default=None, max_length=2000)
+    attachments: list[str] = Field(default_factory=list, sa_column=Column(JSON))
 
 
 class Entity(EntityBase, table=True):
@@ -71,12 +75,20 @@ class EntityUpdate(SQLModel):
     date_end: Optional[str] = None
     parent_id: Optional[str] = None
     tags: Optional[list[str]] = None
+    place_name: Optional[str] = None
+    place_url: Optional[str] = None
+    attachments: Optional[list[str]] = None
 
 
 class EntityRead(EntityBase):
     id: str
     created_at: datetime
     updated_at: datetime
+
+
+class TopicCreate(SQLModel):
+    title: str = Field(min_length=1, max_length=500)
+    event_ids: list[str] = Field(default_factory=list)
 
 
 # ---------- Link ----------

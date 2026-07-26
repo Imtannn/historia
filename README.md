@@ -1,21 +1,30 @@
 # Historia
 
-Personal history notebook — **organize** knowledge (Notion-like hubs) and **learn** it (Duolingo-like flashcards & quizzes). Local-only: no login, no cloud, no API keys.
+Personal history notebook — organize **events** (date, notes, @links, tags, place, file links) and group them into **topics**. Learn side: flashcards & quizzes. No login or API keys.
 
-## Run
+## Run locally
 
 ```bash
-python3.12 -m venv .venv          # 3.11+ required
-source .venv/bin/activate         # Windows: .venv\Scripts\activate
+npm run setup    # once: create .venv + install Python deps
+npm run dev      # starts the app and opens the browser
+```
+
+Same as `python run.py` under the hood (FastAPI + Uvicorn). No frontend build — npm is only a launcher.
+
+Or without npm:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python run.py
 ```
 
-Opens [http://127.0.0.1:8765](http://127.0.0.1:8765). One command after install: `python run.py`.
+Opens [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
 ## Database
 
-All data lives in `historia.db` at the project root (SQLite via SQLModel). Tables and a Progress row are created on first launch.
+Locally: `historia.db` at the project root. On Railway: `/data/historia.db` (volume). Tables and a Progress row are created on first launch.
 
 ## Export / Import
 
@@ -26,39 +35,40 @@ JSON backup is the only safety net — treat it as first-class.
 | Export | Settings → **Export JSON**, or `GET /api/export` |
 | Import | Settings → choose file → **Merge by id** (default) or **Replace all** |
 | Wipe | Settings → Danger zone (double confirm) |
-| Sample | Settings or Home empty state → **Load sample set** (empty DB only) |
+| Sample | Settings → **Load sample set** (empty DB only) |
 
-Import validates links and review states before writing.
+## Deploy on Railway
+
+Same pattern as Outreach: Dockerfile + `railway.toml`, SQLite on a volume at `/data`.
+
+1. Push this repo to GitHub.
+2. **Railway** → New project → Deploy from that repo (uses `Dockerfile` / `railway.toml`).
+3. **Volume** → mount path `/data` (persist `historia.db`).
+4. Env (image defaults already set):
+   - `DATA_DIR=/data`
+   - `SQLITE_PATH=/data/historia.db`
+   - Railway sets `PORT` automatically
+5. Generate a public domain (Settings → Networking → Generate domain).
+6. Open `https://<service>.up.railway.app`.
+
+Health check: `GET /api/health`.
+
+CLI (from this folder, after `railway login`):
+
+```bash
+railway init          # or railway link
+railway up
+railway domain
+```
 
 ## Features
 
-- **Library** — quick-add any entity type; search and filter by type/tag
-- **Entity hubs** — grouped related entries + automatic backlinks
-- **Timeline** — horizontal BCE-aware axis (undated items sort last, never crash)
-- **Flashcards / Quiz** — template-generated from your notes (MCQ, type-in, match)
-- **XP, streaks, daily goal** — encouraging progress; celebration when the goal is hit
-
-## Project layout
-
-```
-app/
-  models.py          # Entity, Link, ReviewState, Progress
-  db.py              # SQLite engine + init
-  dates.py           # Year-only / BCE helpers
-  learn.py           # Flashcard & quiz generation
-  progress_logic.py  # XP + streak rules
-  seed.py            # Sample Modern Europe set
-  api/               # FastAPI routers
-  static/js/         # Vanilla ES-module SPA
-  templates/         # index.html shell
-run.py
-historia.db          # created at runtime
-```
+- **Events** — short add form: flexible date + BC/AC, note, @ related events, tags, place URL, file links
+- **Library board** — auto-sorted by date; multi-select → **Group into topic**
+- **Topics** — named groups of events
+- **Flashcards / Quiz** — generated from your events
+- **XP, streaks, daily goal**
 
 ## Stack
 
-Python 3.11+, FastAPI, Uvicorn, SQLModel/SQLite, vanilla JS + Tailwind CDN. No npm build step. Works offline after first load (browser may cache CDN assets).
-
-## Stretch (not in v1)
-
-Graph neighborhood view, SM-2 spaced repetition (seam left via ReviewState), mastery charts, LLM smart-parse.
+Python 3.11+, FastAPI, Uvicorn, SQLModel/SQLite, vanilla JS + Tailwind CDN.

@@ -50,18 +50,28 @@ def dashboard(session: Session = Depends(get_session)) -> dict:
     session.commit()
     session.refresh(progress)
 
+    from app.models import EntityType
+
     entities = list(session.exec(select(Entity)).all())
+    events = [e for e in entities if e.type == EntityType.event]
     reviews = {r.entity_id: r for r in session.exec(select(ReviewState)).all()}
 
-    recent = sorted(entities, key=lambda e: e.created_at, reverse=True)[:6]
+    def read(e: Entity) -> EntityRead:
+        data = e.model_dump()
+        if data.get("tags") is None:
+            data["tags"] = []
+        if data.get("attachments") is None:
+            data["attachments"] = []
+        return EntityRead.model_validate(data)
 
-    # Weakest topics: lowest mastery among reviewed, or unseen with cards
+    recent = sorted(events, key=lambda e: e.created_at, reverse=True)[:6]
+
     weak = []
-    for e in entities:
+    for e in events:
         rs = reviews.get(e.id)
         mastery = rs.mastery if rs and rs.times_seen else 0.0
         seen = rs.times_seen if rs else 0
-        weak.append({"entity": EntityRead.model_validate(e), "mastery": mastery, "times_seen": seen})
+        weak.append({"entity": read(e), "mastery": mastery, "times_seen": seen})
     weak.sort(key=lambda x: (x["times_seen"] == 0, x["mastery"], x["entity"].title.lower()))
     weak = weak[:5]
 
@@ -71,8 +81,8 @@ def dashboard(session: Session = Depends(get_session)) -> dict:
 
     return {
         "progress": _progress_read(progress),
-        "entity_count": len(entities),
+        "entity_count": len(events),
         "by_type": by_type,
-        "recent": [EntityRead.model_validate(e) for e in recent],
+        "recent": [read(e) for e in recent],
         "weakest": weak,
     }

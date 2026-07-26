@@ -1,0 +1,13 @@
+{
+  "name": "historia",
+  "private": true,
+  "description": "Personal history notebook — FastAPI + vanilla JS (npm scripts wrap Python)",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": ".venv/bin/python run.py",
+    "start": ".venv/bin/python run.py"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

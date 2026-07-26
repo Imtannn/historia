@@ -56,7 +56,15 @@ export function startRouter(onResolve) {
     document.querySelectorAll("[data-nav]").forEach((el) => {
       el.classList.toggle("active", el.dataset.nav === navKey || (navKey === "" && el.dataset.nav === "home"));
     });
-    // Special: entity pages highlight library
+    // Library / Topics tab highlighting
+    if (path === "/library" || path.startsWith("/library")) {
+      const isTopics = query.tab === "topics";
+      document.querySelectorAll("[data-nav]").forEach((el) => {
+        if (el.dataset.nav === "library") el.classList.toggle("active", !isTopics);
+        if (el.dataset.nav === "topics") el.classList.toggle("active", isTopics);
+      });
+    }
+    // Entity pages highlight library (or topics if topic entity — handled loosely as library)
     if (path.startsWith("/entity/")) {
       document.querySelectorAll("[data-nav]").forEach((el) => {
         el.classList.toggle("active", el.dataset.nav === "library");
