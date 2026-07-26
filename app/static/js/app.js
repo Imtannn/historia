@@ -4,23 +4,22 @@ import { api } from "./api.js";
 import { route, startRouter } from "./router.js";
 import { bindModalChrome, openQuickAdd } from "./modal.js";
 import { toast } from "./util.js";
+import { syncProgressChrome } from "./progress-ui.js";
 import { renderHome } from "./views/home.js";
 import { renderLibrary } from "./views/library.js";
 import { renderEntity } from "./views/entity.js";
 import { renderTimeline } from "./views/timeline.js";
+import { renderFlashcards } from "./views/flashcards.js";
 
 const view = () => document.getElementById("view");
 
 async function refreshHeader() {
-  const streakEl = document.getElementById("streak-count");
-  const xpEl = document.getElementById("header-xp");
   try {
     const p = await api.getProgress();
-    streakEl.textContent = `${p.streak_current} day streak`;
-    xpEl.textContent = `${p.xp_today} / ${p.daily_goal_xp} XP today`;
+    syncProgressChrome(p);
   } catch {
-    streakEl.textContent = "Streak soon";
-    xpEl.textContent = "";
+    const streakEl = document.getElementById("streak-count");
+    if (streakEl) streakEl.textContent = "—";
   }
 }
 
@@ -67,7 +66,7 @@ route("/", ({ root }) => renderHome(root));
 route("/library", ({ root, query }) => renderLibrary(root, { query }));
 route("/entity/:id", ({ root, params }) => renderEntity(root, { params }));
 route("/timeline", ({ root, query }) => renderTimeline(root, { query }));
-route("/flashcards", stub("Flashcards"));
+route("/flashcards", ({ root }) => renderFlashcards(root));
 route("/quiz", stub("Quiz"));
 route("/settings", stub("Settings"));
 

@@ -47,15 +47,24 @@ export const api = {
   updateProgress: (body) => request("/progress", { method: "PATCH", body: JSON.stringify(body) }),
   review: (body) => request("/learn/review", { method: "POST", body: JSON.stringify(body) }),
   flashcards: (params = {}) => {
-    const q = new URLSearchParams(params);
-    return request(`/learn/flashcards?${q}`);
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v != null && v !== "") q.set(k, v);
+    });
+    const s = q.toString();
+    return request(`/learn/flashcards${s ? `?${s}` : ""}`);
   },
   quizSession: (body) => request("/learn/quiz", { method: "POST", body: JSON.stringify(body) }),
+  checkAnswer: (body) => request("/learn/check", { method: "POST", body: JSON.stringify(body) }),
   dashboard: () => request("/dashboard"),
   seed: () => request("/seed", { method: "POST" }),
   renderMarkdown: (text) => request("/markdown", { method: "POST", body: JSON.stringify({ text }) }),
   timeline: (params = {}) => {
-    const q = new URLSearchParams(params);
-    return request(`/timeline?${q}`);
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v != null && v !== "") q.set(k, v);
+    });
+    const s = q.toString();
+    return request(`/timeline${s ? `?${s}` : ""}`);
   },
 };
