@@ -1,0 +1,38 @@
+/* Historia — small extras beyond Tailwind */
+
+html { scroll-behavior: smooth; }
+
+.card-flip {
+  perspective: 1000px;
+}
+.card-flip-inner {
+  transition: transform 0.5s;
+  transform-style: preserve-3d;
+  position: relative;
+}
+.card-flip.flipped .card-flip-inner {
+  transform: rotateY(180deg);
+}
+.card-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.card-back {
+  transform: rotateY(180deg);
+  position: absolute;
+  inset: 0;
+}
+
+@keyframes celebrate-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.celebrate {
+  animation: celebrate-pop 0.55s ease-out;
+}
+
+/* Goal ring */
+.goal-ring {
+  transform: rotate(-90deg);
+}
