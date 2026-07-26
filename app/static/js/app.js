@@ -6,6 +6,7 @@ import { bindModalChrome, openQuickAdd } from "./modal.js";
 import { toast } from "./util.js";
 import { renderHome } from "./views/home.js";
 import { renderLibrary } from "./views/library.js";
+import { renderEntity } from "./views/entity.js";
 
 const view = () => document.getElementById("view");
 
@@ -63,7 +64,7 @@ function stub(name) {
 
 route("/", ({ root }) => renderHome(root));
 route("/library", ({ root, query }) => renderLibrary(root, { query }));
-route("/entity/:id", stub("Entity"));
+route("/entity/:id", ({ root, params }) => renderEntity(root, { params }));
 route("/timeline", stub("Timeline"));
 route("/flashcards", stub("Flashcards"));
 route("/quiz", stub("Quiz"));

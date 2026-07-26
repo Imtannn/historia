@@ -162,27 +162,32 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
         return _entity_read(e) if e else None
 
     related: dict[str, list[dict]] = {}
-    for link in outgoing:
-        other = load(link.target_id)
-        if not other:
-            continue
+    seen_in_related: set[str] = set()
+
+    def add_related(other: EntityRead, relation, direction: str, link_id: str | None) -> None:
+        if other.id in seen_in_related or other.id == entity_id:
+            return
+        seen_in_related.add(other.id)
         bucket = other.type.value if hasattr(other.type, "value") else str(other.type)
         related.setdefault(bucket, []).append(
-            {"entity": other, "relation": link.relation, "direction": "out", "link_id": link.id}
+            {"entity": other, "relation": relation, "direction": direction, "link_id": link_id}
         )
+
+    for link in outgoing:
+        other = load(link.target_id)
+        if other:
+            add_related(other, link.relation, "out", link.id)
+
+    # Incoming links also populate hub groups (e.g. country → its events)
+    for link in incoming:
+        other = load(link.source_id)
+        if other:
+            add_related(other, link.relation, "in", link.id)
 
     # Children via parent_id
     children = session.exec(select(Entity).where(Entity.parent_id == entity_id)).all()
     for child in children:
-        bucket = child.type.value
-        related.setdefault(bucket, []).append(
-            {
-                "entity": _entity_read(child),
-                "relation": "child",
-                "direction": "child",
-                "link_id": None,
-            }
-        )
+        add_related(_entity_read(child), "child", "child", None)
 
     backlinks = []
     for link in incoming:
