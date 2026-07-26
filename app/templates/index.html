@@ -10,13 +10,16 @@
       theme: {
         extend: {
           colors: {
-            accent: { DEFAULT: '#C45C26', soft: '#F3E0D4', dark: '#8B3A12' },
+            accent: { DEFAULT: '#C45C26', soft: '#F3E0D4', dark: '#8B3A12', glow: '#E07840' },
             ink: { DEFAULT: '#1C1917', muted: '#78716C', faint: '#A8A29E' },
-            paper: { DEFAULT: '#FAF7F2', card: '#FFFFFF', line: '#E7E0D6' },
+            paper: { DEFAULT: '#FAF7F2', card: '#FFFFFF', line: '#E7E0D6', deep: '#F0EBE3' },
           },
           fontFamily: {
             display: ['"Fraunces"', 'Georgia', 'serif'],
             sans: ['"Source Sans 3"', 'system-ui', 'sans-serif'],
+          },
+          boxShadow: {
+            soft: '0 1px 2px rgba(28,25,23,0.04), 0 8px 24px rgba(28,25,23,0.06)',
           },
         },
       },
@@ -28,13 +31,64 @@
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body class="bg-paper text-ink font-sans antialiased min-h-screen">
-  <div id="app" class="min-h-screen flex items-center justify-center p-8">
-    <div class="text-center">
-      <h1 class="font-display text-4xl text-ink mb-2">Historia</h1>
-      <p class="text-ink-muted">Loading…</p>
-      <p id="health" class="mt-4 text-sm text-ink-faint"></p>
+  <div id="app-root" class="min-h-screen flex">
+    <!-- Mobile overlay -->
+    <div id="sidebar-overlay" class="fixed inset-0 bg-ink/30 z-30 hidden lg:hidden"></div>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="fixed lg:sticky top-0 left-0 z-40 h-screen w-64 bg-paper-deep border-r border-paper-line flex flex-col -translate-x-full lg:translate-x-0 transition-transform duration-200">
+      <div class="px-5 pt-6 pb-4">
+        <a href="#/" class="block group">
+          <span class="font-display text-2xl tracking-tight text-ink group-hover:text-accent transition-colors">Historia</span>
+          <p class="text-xs text-ink-faint mt-0.5">Your history notebook</p>
+        </a>
+      </div>
+
+      <nav class="flex-1 px-3 space-y-0.5 overflow-y-auto" id="main-nav">
+        <a href="#/" data-nav="home" class="nav-link">Home</a>
+        <a href="#/library" data-nav="library" class="nav-link">Library</a>
+        <a href="#/timeline" data-nav="timeline" class="nav-link">Timeline</a>
+        <div class="pt-4 pb-1 px-3 text-[10px] uppercase tracking-wider text-ink-faint font-semibold">Learn</div>
+        <a href="#/flashcards" data-nav="flashcards" class="nav-link">Flashcards</a>
+        <a href="#/quiz" data-nav="quiz" class="nav-link">Quiz</a>
+        <div class="pt-4 pb-1 px-3 text-[10px] uppercase tracking-wider text-ink-faint font-semibold">System</div>
+        <a href="#/settings" data-nav="settings" class="nav-link">Settings</a>
+      </nav>
+
+      <div id="sidebar-streak" class="px-5 py-4 border-t border-paper-line text-sm text-ink-muted">
+        <span class="inline-flex items-center gap-1.5">
+          <span aria-hidden="true">🔥</span>
+          <span id="streak-count">—</span>
+        </span>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div class="flex-1 flex flex-col min-w-0 min-h-screen">
+      <header class="sticky top-0 z-20 bg-paper/90 backdrop-blur border-b border-paper-line px-4 lg:px-8 h-14 flex items-center gap-3">
+        <button id="menu-btn" type="button" class="lg:hidden p-2 -ml-2 rounded-lg hover:bg-paper-deep text-ink-muted" aria-label="Open menu">
+          <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+        </button>
+        <div id="header-meta" class="flex-1 text-sm text-ink-muted truncate"></div>
+        <div id="header-xp" class="text-sm font-medium text-accent tabular-nums"></div>
+        <button id="quick-add-btn" type="button" class="btn-primary text-sm px-3 py-1.5">+ Add</button>
+      </header>
+
+      <main id="view" class="flex-1 px-4 lg:px-8 py-6 max-w-5xl w-full mx-auto"></main>
     </div>
   </div>
-  <script type="module" src="/static/js/boot.js"></script>
+
+  <!-- Quick-add modal -->
+  <div id="modal-root" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-ink/40" data-close-modal></div>
+    <div class="absolute inset-x-0 bottom-0 sm:inset-0 sm:flex sm:items-center sm:justify-center p-0 sm:p-6">
+      <div id="modal-panel" class="bg-paper-card rounded-t-2xl sm:rounded-2xl shadow-soft w-full sm:max-w-lg max-h-[90vh] overflow-y-auto p-6 relative"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] hidden px-4 py-2.5 rounded-full bg-ink text-paper text-sm shadow-soft"></div>
+
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>
