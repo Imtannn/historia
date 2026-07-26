@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,18 +16,19 @@ STATIC = ROOT / "static"
 TEMPLATES = ROOT / "templates"
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Historia", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    yield
 
-    @app.on_event("startup")
-    def on_startup() -> None:
-        init_db()
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Historia", version="0.1.0", lifespan=lifespan)
 
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok", "app": "historia"}
 
-    # API routers registered in later commits; keep import soft for skeleton.
     from app.api import router as api_router
 
     app.include_router(api_router, prefix="/api")
