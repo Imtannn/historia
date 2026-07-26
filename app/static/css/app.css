@@ -140,7 +140,16 @@ body {
 }
 .celebrate { animation: celebrate-pop 0.6s ease-out; }
 
-.goal-ring { transform: rotate(-90deg); }
+.goal-ring-wrap { position: relative; width: 9rem; height: 9rem; margin-left: auto; margin-right: auto; }
+.goal-ring-wrap svg { transform: rotate(-90deg); }
+.goal-ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
 
 .prose-historia h1, .prose-historia h2, .prose-historia h3 {
   font-family: "Fraunces", Georgia, serif;

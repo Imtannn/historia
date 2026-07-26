@@ -10,14 +10,14 @@ function goalRing(progress) {
   const c = 2 * Math.PI * r;
   const offset = c - (pct / 100) * c;
   return `
-    <div class="relative w-36 h-36 mx-auto">
-      <svg class="goal-ring w-full h-full" viewBox="0 0 120 120" aria-hidden="true">
+    <div class="goal-ring-wrap">
+      <svg class="w-full h-full" viewBox="0 0 120 120" aria-hidden="true">
         <circle cx="60" cy="60" r="${r}" fill="none" stroke="#E7E0D6" stroke-width="10" />
         <circle cx="60" cy="60" r="${r}" fill="none" stroke="#C45C26" stroke-width="10"
           stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${offset}"
           style="transition: stroke-dashoffset 0.6s ease" />
       </svg>
-      <div class="absolute inset-0 flex flex-col items-center justify-center" style="transform:none">
+      <div class="goal-ring-label">
         <span class="font-display text-2xl tabular-nums text-ink">${progress.xp_today}</span>
         <span class="text-[11px] text-ink-faint">/ ${progress.daily_goal_xp} XP</span>
       </div>

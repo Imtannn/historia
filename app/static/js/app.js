@@ -11,6 +11,7 @@ import { renderEntity } from "./views/entity.js";
 import { renderTimeline } from "./views/timeline.js";
 import { renderFlashcards } from "./views/flashcards.js";
 import { renderQuiz } from "./views/quiz.js";
+import { renderSettings } from "./views/settings.js";
 
 const view = () => document.getElementById("view");
 
@@ -54,22 +55,13 @@ function bindShell() {
   bindModalChrome();
 }
 
-function stub(name) {
-  return async (root) => {
-    root.innerHTML = `
-      <h1 class="font-display text-3xl mb-2">${name}</h1>
-      <p class="text-ink-muted">Coming in the next build step.</p>
-    `;
-  };
-}
-
 route("/", ({ root }) => renderHome(root));
 route("/library", ({ root, query }) => renderLibrary(root, { query }));
 route("/entity/:id", ({ root, params }) => renderEntity(root, { params }));
 route("/timeline", ({ root, query }) => renderTimeline(root, { query }));
 route("/flashcards", ({ root }) => renderFlashcards(root));
 route("/quiz", ({ root }) => renderQuiz(root));
-route("/settings", stub("Settings"));
+route("/settings", ({ root }) => renderSettings(root));
 
 bindShell();
 refreshHeader();

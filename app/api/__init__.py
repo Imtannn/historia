@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api import backup, entities, learn, links, markdown, progress, timeline
+from app.api import backup, entities, learn, links, markdown, progress, seed, timeline
 
 router = APIRouter()
 router.include_router(entities.router)
@@ -12,6 +12,7 @@ router.include_router(markdown.router)
 router.include_router(timeline.router)
 router.include_router(progress.router)
 router.include_router(learn.router)
+router.include_router(seed.router)
 
 
 @router.get("/ping")
