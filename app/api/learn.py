@@ -11,7 +11,7 @@ from sqlmodel import Session
 from app.db import get_session
 from app.learn import answers_match, build_quiz_session, list_flashcards
 from app.models import ProgressRead, ReviewStateRead
-from app.progress_logic import apply_review, ensure_progress, roll_daily_if_needed
+from app.progress_logic import apply_review
 
 router = APIRouter(prefix="/learn", tags=["learn"])
 

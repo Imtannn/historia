@@ -1,7 +1,7 @@
 /** Dashboard — streak, XP ring, review CTA, weakest topics. */
 
 import { api } from "../api.js";
-import { escapeHtml, formatRange, typeLabel } from "../util.js";
+import { escapeHtml, formatRange, typeLabel, toast } from "../util.js";
 import { syncProgressChrome } from "../progress-ui.js";
 
 function goalRing(progress) {
@@ -66,7 +66,11 @@ export async function renderHome(root) {
         ${
           data.recent.length === 0
             ? `<div class="rounded-2xl border border-dashed border-paper-line p-6 text-sm text-ink-muted text-center">
-                Empty for now. <a href="#/settings" class="text-accent underline">Load sample set</a> or hit + Add.
+                Empty for now.
+                <div class="mt-4 flex flex-wrap justify-center gap-2">
+                  <button type="button" id="home-seed" class="btn-secondary px-4 py-2">Load sample set</button>
+                  <button type="button" id="home-add" class="btn-primary px-4 py-2">+ Add entry</button>
+                </div>
               </div>`
             : `<div class="space-y-2">
                 ${data.recent
@@ -118,4 +122,23 @@ export async function renderHome(root) {
       </section>
     </div>
   `;
+
+  const seedBtn = document.getElementById("home-seed");
+  if (seedBtn) {
+    seedBtn.addEventListener("click", async () => {
+      try {
+        const res = await api.seed();
+        toast(`Loaded ${res.created} sample entries`);
+        location.hash = "/library";
+      } catch (err) {
+        toast(err.message || "Could not load samples");
+      }
+    });
+  }
+  const addBtn = document.getElementById("home-add");
+  if (addBtn) {
+    addBtn.addEventListener("click", () => {
+      document.getElementById("quick-add-btn")?.click();
+    });
+  }
 }
