@@ -189,7 +189,7 @@ def generate_flashcard(session: Session, entity: Entity) -> Optional[dict[str, A
             answer_bits.append(entity.summary)
         return {
             "entity_id": entity.id,
-            "prompt": f"What is the milestone “{entity.title}”?",
+            "prompt": f"What is the moment “{entity.title}”?",
             "answer": "; ".join(answer_bits) or entity.title,
             "kind": "milestone",
             "xp": XP_FLASHCARD,

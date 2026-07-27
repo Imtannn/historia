@@ -1,16 +1,391 @@
-/** Short Add Event modal — title, flexible date + BC/AC, @links, tags, place, file links. */
+/** Add Event modal — Country/World → Period → Figure/Empire cascade. */
 
 import { api } from "./api.js";
-import { composeDate, escapeHtml, normalizeTag, toast } from "./util.js";
+import {
+  composeDate,
+  escapeHtml,
+  formatRange,
+  formatSignedYear,
+  normalizeTag,
+  signedYearToStored,
+  splitDateParts,
+  storedToSignedYear,
+  toast,
+} from "./util.js";
 
 let allEvents = [];
-let selectedLinks = new Map(); // id -> event
+let hubs = { period: [], phase: [], country: [], figure: [] };
+let catalog = { countries: [], empires: [], periods: [], figures: [] };
+let selectedRelated = new Map();
+let selectedBelong = {
+  period: new Map(),
+  phase: new Map(),
+  country: new Map(), // modern countries + World + empires (all place hubs)
+  figure: new Map(),
+};
 let attachments = [];
+/** Periods / phases kept even if dates don’t auto-map (hub CTAs / edit links). */
+let pinnedPeriodIds = new Set();
+let pinnedPhaseIds = new Set();
+
+function empireNameSet() {
+  return new Set((catalog.empires || []).map((e) => e.name.toLowerCase()));
+}
+
+function isEmpireTitle(title) {
+  return empireNameSet().has(String(title || "").toLowerCase());
+}
+
+function isWorldTitle(title) {
+  return String(title || "").toLowerCase() === "world";
+}
+
+/** Modern countries + World (not empires). Exactly one when set. */
+function selectedPlaces() {
+  return [...selectedBelong.country.values()].filter((e) => !isEmpireTitle(e.title));
+}
+
+function primaryPlace() {
+  return selectedPlaces()[0] || null;
+}
+
+function clearPrimaryPlaces() {
+  for (const e of selectedPlaces()) {
+    selectedBelong.country.delete(e.id);
+  }
+}
+
+/** Empires linked to the selected modern country. Hidden for World. */
+function empiresForContext() {
+  const place = primaryPlace();
+  if (!place || isWorldTitle(place.title)) return [];
+  const name = place.title.toLowerCase();
+  return (catalog.empires || []).filter((e) =>
+    (e.modern || []).some((m) => m.toLowerCase() === name)
+  );
+}
+
+/** Drop empires that no longer match the selected country (or clear them on World). */
+function pruneEmpiresForPrimary() {
+  const place = primaryPlace();
+  if (!place || isWorldTitle(place.title)) {
+    for (const e of selectedEmpires()) {
+      selectedBelong.country.delete(e.id);
+    }
+    return;
+  }
+  const allowed = new Set(empiresForContext().map((e) => e.name.toLowerCase()));
+  for (const e of selectedEmpires()) {
+    if (!allowed.has(e.title.toLowerCase())) {
+      selectedBelong.country.delete(e.id);
+    }
+  }
+}
+
+/** If edit data has multiple countries, keep one (prefer non-World). */
+function normalizeToSingleCountry() {
+  const places = selectedPlaces();
+  if (places.length <= 1) return;
+  const preferred = places.find((p) => !isWorldTitle(p.title)) || places[0];
+  for (const p of places) {
+    if (p.id !== preferred.id) selectedBelong.country.delete(p.id);
+  }
+}
+
+function selectedEmpires() {
+  return [...selectedBelong.country.values()].filter((e) => isEmpireTitle(e.title));
+}
+
+function hasPlaceContext() {
+  return selectedPlaces().length > 0;
+}
+
+function catalogPeriodByName(name) {
+  return (
+    (catalog.periods || []).find((p) => p.name.toLowerCase() === String(name || "").toLowerCase()) ||
+    null
+  );
+}
+
+/** Period overlaps the selected era (BC years are negative). Custom periods without range always match. */
+function periodMatchesEra(periodMeta, era) {
+  if (!periodMeta || periodMeta.start_year == null || periodMeta.end_year == null) return true;
+  if (era === "bc") return periodMeta.start_year < 0;
+  return periodMeta.end_year > 0;
+}
+
+function selectedEra() {
+  return document.querySelector('input[name="qa-from-era"]:checked')?.value || "ac";
+}
+
+/** Drop selected periods that no longer fit the chosen BC/AC era. */
+function clearPeriodIfEraMismatch() {
+  const era = selectedEra();
+  let cleared = false;
+  for (const [id, period] of [...selectedBelong.period.entries()]) {
+    const meta = periodMetaFor(period);
+    if (!periodMatchesEra(meta, era)) {
+      selectedBelong.period.delete(id);
+      pinnedPeriodIds.delete(id);
+      cleared = true;
+    }
+  }
+  return cleared;
+}
+
+/** Prefill From/To on inline period/phase create from the event dates. */
+function defaultCreateYearsFromEvent() {
+  const from = readEventDateSide("qa-from");
+  const to = readEventDateSide("qa-to");
+  const fromYear = from.signed != null ? String(Math.abs(from.signed)) : "";
+  const toYear = to.signed != null ? String(Math.abs(to.signed)) : fromYear;
+  return {
+    fromYear,
+    fromEra: from.era || selectedEra(),
+    toYear,
+    toEra: to.signed != null ? to.era : from.era || selectedEra(),
+  };
+}
+
+/** Prefer the period entity's from/to; fall back to catalog years by name. */
+function periodMetaFor(periodOrName) {
+  if (periodOrName && typeof periodOrName === "object") {
+    const start = storedToSignedYear(periodOrName.date_start);
+    const end = storedToSignedYear(periodOrName.date_end);
+    if (start != null || end != null) {
+      return {
+        name: periodOrName.title,
+        start_year: start ?? end,
+        end_year: end ?? start,
+      };
+    }
+    return catalogPeriodByName(periodOrName.title);
+  }
+  return catalogPeriodByName(periodOrName);
+}
+
+function periodOverlapsRange(meta, start, end) {
+  if (!meta || meta.start_year == null || meta.end_year == null) return false;
+  if (start == null) return false;
+  const lo = start;
+  const hi = end == null ? start : end;
+  // Inclusive overlap: event touches the period at any point
+  return lo <= meta.end_year && hi >= meta.start_year;
+}
+
+/** Notebook periods (yours) that overlap [start, end]. */
+function findNotebookPeriodsContaining(start, end = start) {
+  if (start == null) return [];
+  const hi = end == null ? start : end;
+  const lo = start;
+  const out = [];
+  for (const p of hubs.period) {
+    const meta = periodMetaFor(p);
+    if (!periodOverlapsRange(meta, lo, hi)) continue;
+    out.push({
+      entity: p,
+      meta,
+      span: meta.end_year - meta.start_year,
+    });
+  }
+  out.sort((a, b) => a.span - b.span || a.entity.title.localeCompare(b.entity.title));
+  return out;
+}
+
+/** Notebook phases that overlap [start, end]. */
+function findNotebookPhasesContaining(start, end = start) {
+  if (start == null) return [];
+  const hi = end == null ? start : end;
+  const lo = start;
+  const out = [];
+  for (const p of hubs.phase || []) {
+    const meta = periodMetaFor(p);
+    if (!periodOverlapsRange(meta, lo, hi)) continue;
+    out.push({
+      entity: p,
+      meta,
+      span: meta.end_year - meta.start_year,
+    });
+  }
+  out.sort((a, b) => a.span - b.span || a.entity.title.localeCompare(b.entity.title));
+  return out;
+}
+
+function collectPinned(kind) {
+  const ids = kind === "phase" ? pinnedPhaseIds : pinnedPeriodIds;
+  const map = selectedBelong[kind];
+  const hubList = hubs[kind] || [];
+  const pinned = [];
+  for (const id of ids) {
+    const ent = map.get(id) || hubList.find((p) => p.id === id) || null;
+    if (ent) pinned.push(ent);
+  }
+  return pinned;
+}
+
+/**
+ * Auto-link notebook periods + phases whose From–To overlap the event dates.
+ * Keeps any pinned periods/phases (hub CTAs / edit links).
+ */
+function autoAssignPeriodsFromEventDates() {
+  const from = readEventDateSide("qa-from");
+  const to = readEventDateSide("qa-to");
+  // No date yet — keep any preselected / edit periods & phases
+  if (from.error || to.error || from.signed == null) {
+    return {
+      matched: [...selectedBelong.period.values()],
+      phases: [...selectedBelong.phase.values()],
+    };
+  }
+
+  const start = from.signed;
+  const end = to.signed ?? from.signed;
+  const periodHits = findNotebookPeriodsContaining(start, end);
+  const phaseHits = findNotebookPhasesContaining(start, end);
+  const pinnedPeriods = collectPinned("period");
+  const pinnedPhases = collectPinned("phase");
+
+  selectedBelong.period.clear();
+  for (const h of periodHits) {
+    selectedBelong.period.set(h.entity.id, h.entity);
+  }
+  for (const ent of pinnedPeriods) {
+    selectedBelong.period.set(ent.id, ent);
+  }
+
+  selectedBelong.phase.clear();
+  for (const h of phaseHits) {
+    selectedBelong.phase.set(h.entity.id, h.entity);
+  }
+  for (const ent of pinnedPhases) {
+    selectedBelong.phase.set(ent.id, ent);
+  }
+
+  return {
+    matched: [...selectedBelong.period.values()],
+    phases: [...selectedBelong.phase.values()],
+  };
+}
+
+/** Periods that overlap a phase’s From–To (for create/edit phase). */
+function autoAssignPeriodsForRange(start, end) {
+  if (start == null) return [];
+  return findNotebookPeriodsContaining(start, end == null ? start : end).map((h) => h.entity);
+}
+
+async function onEventDateFieldsChanged() {
+  syncDateConstraints();
+  autoAssignPeriodsFromEventDates();
+  refreshBelongUI();
+}
+
+/** Bounds from the selected period's from/to (entity or catalog). */
+function selectedPeriodBounds() {
+  const periods = [...selectedBelong.period.values()];
+  if (!periods.length) return null;
+  // Use the narrowest selected period for date locking
+  let best = null;
+  for (const period of periods) {
+    const meta = periodMetaFor(period);
+    if (!meta || meta.start_year == null || meta.end_year == null) continue;
+    const span = meta.end_year - meta.start_year;
+    if (!best || span < best.span) {
+      best = { start: meta.start_year, end: meta.end_year, name: period.title, span };
+    }
+  }
+  if (!best) return null;
+  return { start: best.start, end: best.end, name: best.name };
+}
+
+function syncDateConstraints() {
+  const bounds = selectedPeriodBounds();
+  const hint = document.getElementById("date-period-hint");
+  const yearEls = ["qa-from-year", "qa-to-year"]
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+  if (!yearEls.length) return;
+
+  yearEls.forEach((yearEl) => {
+    yearEl.removeAttribute("min");
+    yearEl.removeAttribute("max");
+    yearEl.placeholder = "Year";
+  });
+
+  if (!bounds) {
+    if (hint) {
+      hint.textContent = "Set From / To with AC or BC — periods map from the range.";
+    }
+    return;
+  }
+
+  const { start, end, name } = bounds;
+  if (hint) {
+    hint.textContent = `Mapped to ${name} (${formatSignedYear(start)} – ${formatSignedYear(end)})`;
+  }
+}
+
+function eraForSide(prefix) {
+  return document.querySelector(`input[name="${prefix}-era"]:checked`)?.value || "ac";
+}
+
+function signedYearFromSide(prefix) {
+  const year = document.getElementById(`${prefix}-year`)?.value;
+  if (year == null || String(year).trim() === "") return null;
+  let y = parseInt(String(year).trim(), 10);
+  if (Number.isNaN(y)) return null;
+  y = Math.abs(y);
+  const era = eraForSide(prefix);
+  return era === "bc" ? -y : y;
+}
+
+function signedYearFromForm() {
+  return signedYearFromSide("qa-from");
+}
+
+function readEventDateSide(prefix) {
+  const day = document.getElementById(`${prefix}-day`)?.value;
+  const month = document.getElementById(`${prefix}-month`)?.value;
+  const year = document.getElementById(`${prefix}-year`)?.value;
+  const era = eraForSide(prefix);
+  if ((month || day) && !String(year || "").trim()) {
+    return { error: "Add a year if you set month or day" };
+  }
+  return {
+    day,
+    month,
+    year,
+    era,
+    stored: composeDate(year, month, day, era),
+    signed: signedYearFromSide(prefix),
+  };
+}
+
+function flagForCountry(name) {
+  const key = String(name || "").toLowerCase();
+  const hit =
+    catalog.countries.find((c) => c.name.toLowerCase() === key) ||
+    (catalog.empires || []).find((e) => e.name.toLowerCase() === key);
+  return hit?.flag || "";
+}
+
+function displayHubLabel(kind, entity) {
+  if (kind === "country" || kind === "empire") {
+    const summary = (entity.summary || "").trim();
+    const flag =
+      flagForCountry(entity.title) ||
+      (summary && !summary.includes(" ") ? summary : "");
+    return flag ? `${flag} ${entity.title}` : entity.title;
+  }
+  return entity.title;
+}
 
 function closeModal() {
   document.getElementById("modal-root").classList.add("hidden");
   document.getElementById("modal-panel").innerHTML = "";
-  selectedLinks = new Map();
+  selectedRelated = new Map();
+  selectedBelong = { period: new Map(), phase: new Map(), country: new Map(), figure: new Map() };
+  pinnedPeriodIds = new Set();
+  pinnedPhaseIds = new Set();
   attachments = [];
 }
 
@@ -18,14 +393,941 @@ function openModal() {
   document.getElementById("modal-root").classList.remove("hidden");
 }
 
-function renderLinkChips() {
+function syncBelongHint() {
+  const hint = document.getElementById("belong-hint");
+  if (!hint) return;
+  if (!hasPlaceContext()) {
+    hint.textContent = "Required: pick a country or World on step 1.";
+    hint.className = "text-xs text-red-700 mt-0 mb-2";
+  } else {
+    const figCount = selectedBelong.figure.size;
+    const parts = [];
+    if (selectedBelong.period.size) {
+      const n = selectedBelong.period.size;
+      parts.push(`${n} period${n === 1 ? "" : "s"}`);
+    }
+    if (selectedBelong.phase.size) {
+      const n = selectedBelong.phase.size;
+      parts.push(`${n} phase${n === 1 ? "" : "s"}`);
+    }
+    if (selectedPlaces().length) parts.push("country");
+    if (figCount) parts.push(`${figCount} figure${figCount === 1 ? "" : "s"}`);
+    if (selectedEmpires().length) parts.push("empire");
+    hint.textContent = parts.length
+      ? `${parts.join(" · ")} linked`
+      : "Search to add periods and phases, or enter dates to auto-map.";
+    hint.className = "text-xs text-ink-faint mt-0 mb-2";
+  }
+  syncCascadeLock();
+}
+
+function syncCascadeLock() {
+  const unlocked = hasPlaceContext();
+  ["actor"].forEach((step) => {
+    const panel = document.getElementById(`belong-step-${step}`);
+    if (!panel) return;
+    panel.classList.toggle("opacity-50", !unlocked);
+    panel.querySelectorAll("input, button").forEach((el) => {
+      if (el.dataset.unlink || el.dataset.rmEmpire || el.dataset.rmFigure) return;
+      el.disabled = !unlocked;
+    });
+    const lock = document.getElementById(`belong-lock-${step}`);
+    if (lock) lock.classList.toggle("hidden", unlocked);
+  });
+}
+
+function chipHtml(label, attrs) {
+  return `
+    <button type="button" ${attrs} class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-accent-soft text-accent-dark text-xs font-medium">
+      ${escapeHtml(label)}
+      <span aria-hidden="true">×</span>
+    </button>`;
+}
+
+function renderCountryChips() {
+  const box = document.getElementById("belong-chips-country");
+  if (!box) return;
+  const place = primaryPlace();
+  const empires = selectedEmpires();
+  if (!place && !empires.length) {
+    box.innerHTML = `<span class="text-xs text-ink-faint">None selected</span>`;
+    return;
+  }
+  let html = "";
+  if (place) {
+    html += chipHtml(displayHubLabel("country", place), `data-reset-place="1"`);
+  }
+  html += empires
+    .map((e) => chipHtml(displayHubLabel("empire", e), `data-unlink-empire="${e.id}"`))
+    .join("");
+  box.innerHTML = html;
+  box.querySelector("[data-reset-place]")?.addEventListener("click", async () => {
+    clearPrimaryPlaces();
+    try {
+      await setPrimaryPlace("World", "🌍");
+    } catch {
+      refreshBelongUI();
+    }
+  });
+  box.querySelectorAll("[data-unlink-empire]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedBelong.country.delete(btn.dataset.unlinkEmpire);
+      refreshBelongUI();
+    });
+  });
+}
+
+function renderPeriodChips() {
+  const box = document.getElementById("belong-chips-period");
+  if (!box) return;
+  const periods = [...selectedBelong.period.values()];
+  if (!periods.length) {
+    box.innerHTML = `<p class="text-sm text-ink-faint py-1">None yet — search above, or enter dates to auto-map.</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="flex flex-wrap gap-1.5">
+      ${periods
+        .map((period) => {
+          const meta = periodMetaFor(period);
+          const range = meta
+            ? ` · ${formatSignedYear(meta.start_year)}–${formatSignedYear(meta.end_year)}`
+            : "";
+          return chipHtml(`${period.title}${range}`, `data-unlink-period="${period.id}"`);
+        })
+        .join("")}
+    </div>`;
+  box.querySelectorAll("[data-unlink-period]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedBelong.period.delete(btn.dataset.unlinkPeriod);
+      pinnedPeriodIds.delete(btn.dataset.unlinkPeriod);
+      refreshBelongUI();
+    });
+  });
+}
+
+function renderPhaseChips() {
+  const box = document.getElementById("belong-chips-phase");
+  if (!box) return;
+  const phases = [...selectedBelong.phase.values()];
+  if (!phases.length) {
+    box.innerHTML = `<p class="text-sm text-ink-faint py-1">None yet — search above, or enter dates to auto-map.</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="flex flex-wrap gap-1.5">
+      ${phases
+        .map((phase) => {
+          const meta = periodMetaFor(phase);
+          const range = meta
+            ? ` · ${formatSignedYear(meta.start_year)}–${formatSignedYear(meta.end_year)}`
+            : "";
+          return chipHtml(`${phase.title}${range}`, `data-unlink-phase="${phase.id}"`);
+        })
+        .join("")}
+    </div>`;
+  box.querySelectorAll("[data-unlink-phase]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedBelong.phase.delete(btn.dataset.unlinkPhase);
+      pinnedPhaseIds.delete(btn.dataset.unlinkPhase);
+      refreshBelongUI();
+    });
+  });
+}
+
+function renderActorChips() {
+  const box = document.getElementById("belong-chips-actor");
+  if (!box) return;
+  const figures = [...selectedBelong.figure.values()];
+  if (!figures.length) {
+    box.innerHTML = `<p class="text-sm text-ink-faint py-1">No one linked yet — pick from your figures above.</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="flex flex-wrap gap-1.5">
+      ${figures
+        .map(
+          (e) =>
+            chipHtml(e.title, `data-unlink-figure="${e.id}"`)
+        )
+        .join("")}
+    </div>`;
+  box.querySelectorAll("[data-unlink-figure]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedBelong.figure.delete(btn.dataset.unlinkFigure);
+      refreshBelongUI();
+    });
+  });
+}
+
+function catalogButton(kind, item, extra = "") {
+  const hint = item.modern?.length ? item.modern.join(", ") : "";
+  return `
+    <button type="button" data-pick-kind="${kind}" data-pick-name="${escapeHtml(item.name)}" data-pick-flag="${escapeHtml(item.flag || "")}" ${extra}
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex items-start gap-2 disabled:opacity-40">
+      ${item.flag ? `<span class="text-base leading-none mt-0.5">${item.flag}</span>` : ""}
+      <span class="min-w-0">
+        <span class="block">${escapeHtml(item.name)}</span>
+        ${hint ? `<span class="block text-[11px] text-ink-faint">→ ${escapeHtml(hint)}</span>` : ""}
+      </span>
+    </button>`;
+}
+
+function matchesQ(name, q, extra = []) {
+  if (!q) return true;
+  const hay = [name, ...extra].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+function renderCountryCatalog() {
+  const box = document.getElementById("belong-catalog-country");
+  if (!box) return;
+  const q = (document.getElementById("belong-search-country")?.value || "").trim().toLowerCase();
+  const current = primaryPlace()?.title.toLowerCase() || "";
+  const selectedEmpire = new Set(selectedEmpires().map((e) => e.title.toLowerCase()));
+  let items = (catalog.countries || []).filter((c) => matchesQ(c.name, q));
+  items.sort((a, b) => {
+    if (a.name === "World") return -1;
+    if (b.name === "World") return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  let html = "";
+  if (!items.length) {
+    html = `<p class="text-xs text-ink-faint px-1 py-2">No matches</p>`;
+  } else {
+    html =
+      `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Pick one country (or World)</p>` +
+      items
+        .map((c) => {
+          const selected = c.name.toLowerCase() === current;
+          return `
+    <button type="button" data-pick-kind="country" data-pick-name="${escapeHtml(c.name)}" data-pick-flag="${escapeHtml(c.flag || "")}"
+      class="w-full text-left px-2 py-1.5 rounded-lg text-sm flex items-center gap-2 ${selected ? "bg-accent-soft text-accent-dark font-medium" : "hover:bg-paper-deep"}">
+      ${c.flag ? `<span class="text-base leading-none">${c.flag}</span>` : ""}
+      <span class="flex-1 min-w-0">${escapeHtml(c.name)}</span>
+      ${selected ? `<span class="text-[11px] text-accent-dark">Selected</span>` : ""}
+    </button>`;
+        })
+        .join("");
+  }
+
+  // Empires: subgroup of the selected country only (not World)
+  const place = primaryPlace();
+  const showEmpires = place && !isWorldTitle(place.title);
+  if (showEmpires) {
+    const empires = empiresForContext().filter((e) => matchesQ(e.name, q, e.modern || []));
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-2 pb-0.5 border-t border-paper-line mt-1">Empires for ${escapeHtml(place.title)}</p>`;
+    if (!empires.length) {
+      html += `<p class="text-xs text-ink-faint px-2 py-1.5">No empires linked to this country${q ? " for this search" : ""}.</p>`;
+    } else {
+      html += empires
+        .map((e) => {
+          const selected = selectedEmpire.has(e.name.toLowerCase());
+          return `
+    <button type="button" data-pick-kind="empire" data-pick-name="${escapeHtml(e.name)}" data-pick-flag="${escapeHtml(e.flag || "")}"
+      class="w-full text-left px-2 py-1.5 rounded-lg text-sm flex items-start gap-2 ${selected ? "bg-accent-soft text-accent-dark font-medium" : "hover:bg-paper-deep"}">
+      ${e.flag ? `<span class="text-base leading-none mt-0.5">${e.flag}</span>` : ""}
+      <span class="min-w-0 flex-1">
+        <span class="block">${escapeHtml(e.name)}</span>
+        ${e.modern?.length ? `<span class="block text-[11px] ${selected ? "text-accent-dark/80" : "text-ink-faint"}">→ ${escapeHtml(e.modern.join(", "))}</span>` : ""}
+      </span>
+      ${selected ? `<span class="text-[11px] text-accent-dark shrink-0">Added</span>` : `<span class="text-[11px] text-ink-faint shrink-0">Add</span>`}
+    </button>`;
+        })
+        .join("");
+    }
+  }
+
+  box.innerHTML = html;
+  bindPickButtons(box);
+}
+
+function renderPeriodCatalog() {
+  const box = document.getElementById("belong-catalog-period");
+  if (!box) return;
+  const qRaw = (document.getElementById("belong-search-period")?.value || "").trim();
+  const q = qRaw.toLowerCase();
+  const selectedNames = new Set(
+    [...selectedBelong.period.values()].map((e) => e.title.toLowerCase())
+  );
+  const era = selectedEra();
+  const mine = hubs.period
+    .filter((p) => !selectedNames.has(p.title.toLowerCase()))
+    .filter((p) => matchesQ(p.title, q))
+    .filter((p) => periodMatchesEra(periodMetaFor(p) || { start_year: null, end_year: null }, era))
+    .slice()
+    .sort((a, b) => a.title.localeCompare(b.title));
+  const mineNames = new Set(hubs.period.map((p) => p.title.toLowerCase()));
+  const catalogHits = (catalog.periods || [])
+    .filter((p) => !mineNames.has(p.name.toLowerCase()))
+    .filter((p) => !selectedNames.has(p.name.toLowerCase()))
+    .filter((p) => periodMatchesEra(p, era))
+    .filter((p) => matchesQ(p.name, q));
+
+  const exactHit =
+    mine.some((p) => p.title.toLowerCase() === q) ||
+    catalogHits.some((p) => p.name.toLowerCase() === q) ||
+    selectedNames.has(q);
+  const canCreate = q.length >= 2 && !exactHit;
+  const defs = defaultCreateYearsFromEvent();
+
+  if (!mine.length && !catalogHits.length && !canCreate) {
+    box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">${
+      q
+        ? "No matches — keep typing to create a new period."
+        : hubs.period.length
+          ? "All matching periods are linked. Search to add another."
+          : era === "bc"
+            ? "No BC periods yet — search a name to create one."
+            : "No AC periods yet — search a name to create one."
+    }</p>`;
+    bindPickButtons(box);
+    return;
+  }
+
+  let html = "";
+  if (mine.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your periods</p>`;
+    html += mine
+      .map((p) => {
+        const meta = periodMetaFor(p);
+        const range = meta
+          ? `${formatSignedYear(meta.start_year)} – ${formatSignedYear(meta.end_year)}`
+          : "";
+        return `
+    <button type="button" data-pick-existing="${p.id}" data-pick-kind="period"
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm">
+      <span class="block">${escapeHtml(p.title)}</span>
+      ${range ? `<span class="block text-[11px] text-ink-faint">${escapeHtml(range)}</span>` : ""}
+    </button>`;
+      })
+      .join("");
+  } else if (!q) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your periods</p>`;
+    html += `<p class="text-xs text-ink-faint px-2 py-1.5">None yet — search a name to add one.</p>`;
+  }
+
+  if (catalogHits.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 ${mine.length || !q ? "pt-2 border-t border-paper-line mt-1" : "pt-1.5"} pb-0.5">Add from catalog</p>`;
+    html += catalogHits
+      .map((p) => {
+        const range =
+          p.start_year != null
+            ? `${formatSignedYear(p.start_year)} – ${formatSignedYear(p.end_year)}`
+            : "";
+        return `
+    <button type="button" data-pick-kind="period" data-pick-name="${escapeHtml(p.name)}" data-pick-flag=""
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex items-center justify-between gap-2">
+      <span class="min-w-0">
+        <span class="block">${escapeHtml(p.name)}</span>
+        ${range ? `<span class="block text-[11px] text-ink-faint">${escapeHtml(range)}</span>` : ""}
+      </span>
+      <span class="text-[11px] text-accent-dark shrink-0">Add</span>
+    </button>`;
+      })
+      .join("");
+  }
+
+  if (canCreate) {
+    const fromEra = defs.fromEra === "bc" ? "bc" : "ac";
+    const toEra = defs.toEra === "bc" ? "bc" : "ac";
+    html += `
+    <div class="border-t border-paper-line mt-1 px-2 py-2 space-y-2">
+      <p class="text-sm font-medium text-accent-dark">Create period “${escapeHtml(qRaw)}”</p>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-[11px] text-ink-faint" for="period-create-from">From</label>
+          <div class="flex gap-1 items-center mt-0.5">
+            <input id="period-create-from" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
+            <select id="period-create-from-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
+              <option value="ac" ${fromEra === "ac" ? "selected" : ""}>AC</option>
+              <option value="bc" ${fromEra === "bc" ? "selected" : ""}>BC</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="text-[11px] text-ink-faint" for="period-create-to">To</label>
+          <div class="flex gap-1 items-center mt-0.5">
+            <input id="period-create-to" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
+            <select id="period-create-to-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
+              <option value="ac" ${toEra === "ac" ? "selected" : ""}>AC</option>
+              <option value="bc" ${toEra === "bc" ? "selected" : ""}>BC</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <button type="button" data-create-typed-period="${escapeHtml(qRaw)}"
+        class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-accent-soft text-sm text-accent-dark font-medium">
+        Create with this range
+      </button>
+    </div>`;
+  }
+  box.innerHTML = html;
+  bindPickButtons(box);
+  box.querySelectorAll("[data-pick-existing]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const ent = hubs.period.find((x) => x.id === btn.dataset.pickExisting);
+      if (!ent) return;
+      selectedBelong.period.set(ent.id, ent);
+      pinnedPeriodIds.add(ent.id);
+      const search = document.getElementById("belong-search-period");
+      if (search) search.value = "";
+      refreshBelongUI();
+    });
+  });
+  box.querySelectorAll("[data-create-typed-period]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.createTypedPeriod;
+      if (!name) return;
+      const fromY = document.getElementById("period-create-from")?.value.trim();
+      const toY = document.getElementById("period-create-to")?.value.trim();
+      const fromEra = document.getElementById("period-create-from-era")?.value || "ac";
+      const toEra = document.getElementById("period-create-to-era")?.value || "ac";
+      if (!fromY || !toY) {
+        toast("Set From and To years for this period");
+        return;
+      }
+      const date_start = composeDate(fromY, null, null, fromEra);
+      const date_end = composeDate(toY, null, null, toEra);
+      const startN = storedToSignedYear(date_start);
+      const endN = storedToSignedYear(date_end);
+      if (startN != null && endN != null && startN > endN) {
+        toast("From must be earlier than To");
+        return;
+      }
+      try {
+        await ensurePeriod(name, { date_start, date_end });
+        const search = document.getElementById("belong-search-period");
+        if (search) search.value = "";
+        refreshBelongUI();
+        toast(`Created “${name}”`);
+      } catch (err) {
+        toast(err.message || "Could not create");
+      }
+    });
+  });
+}
+
+function renderPhaseCatalog() {
+  const box = document.getElementById("belong-catalog-phase");
+  if (!box) return;
+  const qRaw = (document.getElementById("belong-search-phase")?.value || "").trim();
+  const q = qRaw.toLowerCase();
+  const selectedNames = new Set(
+    [...selectedBelong.phase.values()].map((e) => e.title.toLowerCase())
+  );
+  const mine = (hubs.phase || [])
+    .filter((p) => !selectedNames.has(p.title.toLowerCase()))
+    .filter((p) => matchesQ(p.title, q))
+    .slice()
+    .sort((a, b) => a.title.localeCompare(b.title));
+  const exactHit = mine.some((p) => p.title.toLowerCase() === q) || selectedNames.has(q);
+  const canCreate = q.length >= 2 && !exactHit;
+  const defs = defaultCreateYearsFromEvent();
+
+  if (!mine.length && !canCreate) {
+    box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">${
+      q
+        ? "No matches — keep typing to create a new phase."
+        : (hubs.phase || []).length
+          ? "All your phases are linked. Search to add another."
+          : "No phases yet — search a name to create one."
+    }</p>`;
+    return;
+  }
+
+  let html = "";
+  if (mine.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your phases</p>`;
+    html += mine
+      .map((p) => {
+        const meta = periodMetaFor(p);
+        const range = meta
+          ? `${formatSignedYear(meta.start_year)} – ${formatSignedYear(meta.end_year)}`
+          : "";
+        return `
+    <button type="button" data-pick-existing="${p.id}" data-pick-kind="phase"
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm">
+      <span class="block">${escapeHtml(p.title)}</span>
+      ${range ? `<span class="block text-[11px] text-ink-faint">${escapeHtml(range)}</span>` : ""}
+    </button>`;
+      })
+      .join("");
+  } else if (!q) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your phases</p>`;
+    html += `<p class="text-xs text-ink-faint px-2 py-1.5">None yet — search a name to create one.</p>`;
+  }
+
+  if (canCreate) {
+    const fromEra = defs.fromEra === "bc" ? "bc" : "ac";
+    const toEra = defs.toEra === "bc" ? "bc" : "ac";
+    html += `
+    <div class="border-t border-paper-line mt-1 px-2 py-2 space-y-2">
+      <p class="text-sm font-medium text-accent-dark">Create phase “${escapeHtml(qRaw)}”</p>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-[11px] text-ink-faint" for="phase-create-from">From</label>
+          <div class="flex gap-1 items-center mt-0.5">
+            <input id="phase-create-from" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
+            <select id="phase-create-from-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
+              <option value="ac" ${fromEra === "ac" ? "selected" : ""}>AC</option>
+              <option value="bc" ${fromEra === "bc" ? "selected" : ""}>BC</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="text-[11px] text-ink-faint" for="phase-create-to">To</label>
+          <div class="flex gap-1 items-center mt-0.5">
+            <input id="phase-create-to" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
+            <select id="phase-create-to-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
+              <option value="ac" ${toEra === "ac" ? "selected" : ""}>AC</option>
+              <option value="bc" ${toEra === "bc" ? "selected" : ""}>BC</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <button type="button" data-create-typed-phase="${escapeHtml(qRaw)}"
+        class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-accent-soft text-sm text-accent-dark font-medium">
+        Create with this range
+      </button>
+    </div>`;
+  }
+  box.innerHTML = html;
+  box.querySelectorAll("[data-pick-existing]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const ent = hubs.phase.find((x) => x.id === btn.dataset.pickExisting);
+      if (!ent) return;
+      selectedBelong.phase.set(ent.id, ent);
+      pinnedPhaseIds.add(ent.id);
+      const search = document.getElementById("belong-search-phase");
+      if (search) search.value = "";
+      refreshBelongUI();
+    });
+  });
+  box.querySelectorAll("[data-create-typed-phase]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.createTypedPhase;
+      if (!name) return;
+      const fromY = document.getElementById("phase-create-from")?.value.trim();
+      const toY = document.getElementById("phase-create-to")?.value.trim();
+      const fromEra = document.getElementById("phase-create-from-era")?.value || "ac";
+      const toEra = document.getElementById("phase-create-to-era")?.value || "ac";
+      if (!fromY || !toY) {
+        toast("Set From and To years for this phase");
+        return;
+      }
+      const date_start = composeDate(fromY, null, null, fromEra);
+      const date_end = composeDate(toY, null, null, toEra);
+      const startN = storedToSignedYear(date_start);
+      const endN = storedToSignedYear(date_end);
+      if (startN != null && endN != null && startN > endN) {
+        toast("From must be earlier than To");
+        return;
+      }
+      try {
+        await ensurePhase(name, { date_start, date_end });
+        const search = document.getElementById("belong-search-phase");
+        if (search) search.value = "";
+        refreshBelongUI();
+        toast(`Created “${name}”`);
+      } catch (err) {
+        toast(err.message || "Could not create");
+      }
+    });
+  });
+}
+
+function renderActorCatalog() {
+  const box = document.getElementById("belong-catalog-actor");
+  if (!box) return;
+  if (!hasPlaceContext()) {
+    box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">Pick a country or World first</p>`;
+    return;
+  }
+  const qRaw = (document.getElementById("belong-search-actor")?.value || "").trim();
+  const q = qRaw.toLowerCase();
+  const selectedFigure = new Set([...selectedBelong.figure.values()].map((e) => e.title.toLowerCase()));
+  const mineNames = new Set(hubs.figure.map((f) => f.title.toLowerCase()));
+
+  let mine = hubs.figure
+    .filter((f) => !selectedFigure.has(f.title.toLowerCase()))
+    .filter((f) => matchesQ(f.title, q))
+    .slice()
+    .sort((a, b) => a.title.localeCompare(b.title));
+
+  let catalogHits = [];
+  if (q) {
+    catalogHits = (catalog.figures || [])
+      .filter((f) => !mineNames.has(f.name.toLowerCase()))
+      .filter((f) => !selectedFigure.has(f.name.toLowerCase()))
+      .filter((f) => matchesQ(f.name, q))
+      .slice(0, 12);
+  }
+
+  const exactMine = mine.some((f) => f.title.toLowerCase() === q);
+  const exactCatalog = (catalog.figures || []).some((f) => f.name.toLowerCase() === q);
+  const canCreateTyped = q.length >= 2 && !exactMine && !exactCatalog;
+
+  if (!mine.length && !catalogHits.length && !canCreateTyped) {
+    box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">${
+      q
+        ? "No matches — keep typing to create a new figure."
+        : hubs.figure.length
+          ? "All your figures are already linked. Search to add someone new."
+          : "No figures yet. Search a name to add one from the catalog, or create a new one."
+    }</p>`;
+    bindPickButtons(box);
+    return;
+  }
+
+  let html = "";
+  if (mine.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your figures</p>`;
+    html += mine
+      .map(
+        (f) => `
+    <button type="button" data-pick-existing="${f.id}" data-pick-kind="figure"
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm">
+      ${escapeHtml(f.title)}
+    </button>`
+      )
+      .join("");
+  } else if (!q) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your figures</p>`;
+    html += `<p class="text-xs text-ink-faint px-2 py-1.5">None yet — search a name to add one.</p>`;
+  }
+
+  if (catalogHits.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-2 pb-0.5 border-t border-paper-line mt-1">Add from catalog</p>`;
+    html += catalogHits
+      .map(
+        (f) => `
+    <button type="button" data-pick-kind="figure" data-pick-name="${escapeHtml(f.name)}" data-pick-flag=""
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex items-center justify-between gap-2">
+      <span>${escapeHtml(f.name)}</span>
+      <span class="text-[11px] text-accent-dark shrink-0">Add</span>
+    </button>`
+      )
+      .join("");
+  }
+
+  if (canCreateTyped) {
+    html += `
+    <button type="button" data-create-typed-figure="${escapeHtml(qRaw)}"
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-accent-soft text-sm text-accent-dark font-medium border-t border-paper-line mt-1">
+      Create “${escapeHtml(qRaw)}”
+    </button>`;
+  }
+
+  box.innerHTML = html;
+  bindPickButtons(box);
+  box.querySelectorAll("[data-pick-existing]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const ent = hubs.figure.find((x) => x.id === btn.dataset.pickExisting);
+      if (!ent) return;
+      selectedBelong.figure.set(ent.id, ent);
+      const search = document.getElementById("belong-search-actor");
+      if (search) search.value = "";
+      refreshBelongUI();
+    });
+  });
+  box.querySelectorAll("[data-create-typed-figure]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.createTypedFigure;
+      if (!name) return;
+      try {
+        await ensureTyped("figure", name);
+        const search = document.getElementById("belong-search-actor");
+        if (search) search.value = "";
+        refreshBelongUI();
+        toast(`Added “${name}”`);
+      } catch (err) {
+        toast(err.message || "Could not create");
+      }
+    });
+  });
+}
+
+function bindPickButtons(box) {
+  box.querySelectorAll("[data-pick-kind]").forEach((btn) => {
+    if (
+      btn.hasAttribute("data-pick-existing") ||
+      btn.hasAttribute("data-create-typed-figure") ||
+      btn.hasAttribute("data-create-typed-period") ||
+      btn.hasAttribute("data-create-typed-phase")
+    ) {
+      return;
+    }
+    btn.addEventListener("click", () => {
+      pickFromCatalog(btn.dataset.pickKind, btn.dataset.pickName, btn.dataset.pickFlag || "");
+    });
+  });
+}
+
+function syncPlaceSummary() {
+  const el = document.getElementById("place-summary");
+  if (!el) return;
+  const place = primaryPlace();
+  el.textContent = place ? displayHubLabel("country", place) : "Choose a country or World";
+}
+
+async function setPrimaryPlace(name, flagHint = "") {
+  clearPrimaryPlaces();
+  const existing = hubs.country.find((e) => e.title.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    selectedBelong.country.set(existing.id, existing);
+  } else {
+    const flag = flagHint || flagForCountry(name);
+    const created = await api.createEntity({
+      type: "place",
+      title: name,
+      summary: flag || null,
+      tags: [],
+      attachments: [],
+      period_ids: [],
+      country_ids: [],
+      figure_ids: [],
+      link_ids: [],
+    });
+    hubs.country.push(created);
+    hubs.country.sort((a, b) => a.title.localeCompare(b.title));
+    selectedBelong.country.set(created.id, created);
+  }
+  pruneEmpiresForPrimary();
+  refreshBelongUI();
+  return primaryPlace();
+}
+
+async function ensureEmpire(name, flagHint = "") {
+  const existing = hubs.country.find((e) => e.title.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    selectedBelong.country.set(existing.id, existing);
+    return existing;
+  }
+  const flag = flagHint || flagForCountry(name) || "🏛️";
+  const created = await api.createEntity({
+    type: "place",
+    title: name,
+    summary: flag,
+    tags: [],
+    attachments: [],
+    period_ids: [],
+    country_ids: [],
+    figure_ids: [],
+    link_ids: [],
+  });
+  hubs.country.push(created);
+  hubs.country.sort((a, b) => a.title.localeCompare(b.title));
+  selectedBelong.country.set(created.id, created);
+  return created;
+}
+
+function refreshBelongUI() {
+  renderCountryChips();
+  renderPeriodChips();
+  renderPhaseChips();
+  renderActorChips();
+  renderCountryCatalog();
+  renderPeriodCatalog();
+  renderPhaseCatalog();
+  renderActorCatalog();
+  syncBelongHint();
+  syncPlaceSummary();
+  syncDateConstraints();
+}
+
+async function setPrimaryPeriod(name) {
+  const meta = catalogPeriodByName(name);
+  if (meta && !periodMatchesEra(meta, selectedEra())) {
+    toast(
+      selectedEra() === "bc"
+        ? "That period is AC-only — switch to AC, or pick a BC period"
+        : "That period is BC-only — switch to BC, or pick an AC period"
+    );
+    return;
+  }
+  await ensurePeriod(name);
+  refreshBelongUI();
+}
+
+/** Create or reuse a period, copying catalog from/to when available. */
+async function ensurePeriod(name, { date_start = undefined, date_end = undefined } = {}) {
+  const existing = hubs.period.find((e) => e.title.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    if (!existing.date_start && !existing.date_end) {
+      const meta = catalogPeriodByName(name);
+      if (meta && meta.start_year != null && meta.end_year != null) {
+        try {
+          const updated = await api.updateEntity(existing.id, {
+            date_start: signedYearToStored(meta.start_year),
+            date_end: signedYearToStored(meta.end_year),
+          });
+          Object.assign(existing, updated);
+        } catch {
+          /* keep selecting even if backfill fails */
+        }
+      } else if (date_start != null || date_end != null) {
+        try {
+          const updated = await api.updateEntity(existing.id, {
+            date_start: date_start ?? null,
+            date_end: date_end ?? null,
+          });
+          Object.assign(existing, updated);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    selectedBelong.period.set(existing.id, existing);
+    pinnedPeriodIds.add(existing.id);
+    return existing;
+  }
+
+  let start = date_start;
+  let end = date_end;
+  if (start === undefined && end === undefined) {
+    const meta = catalogPeriodByName(name);
+    if (meta && meta.start_year != null && meta.end_year != null) {
+      start = signedYearToStored(meta.start_year);
+      end = signedYearToStored(meta.end_year);
+    } else {
+      start = null;
+      end = null;
+    }
+  }
+
+  const created = await api.createEntity({
+    type: "period",
+    title: name,
+    summary: null,
+    date_start: start ?? null,
+    date_end: end ?? null,
+    tags: [],
+    attachments: [],
+    period_ids: [],
+    country_ids: [],
+    figure_ids: [],
+    link_ids: [],
+  });
+  hubs.period.push(created);
+  hubs.period.sort((a, b) => a.title.localeCompare(b.title));
+  selectedBelong.period.set(created.id, created);
+  pinnedPeriodIds.add(created.id);
+  return created;
+}
+
+/** Create or reuse a phase with From–To; auto-links overlapping periods. */
+async function ensurePhase(name, { date_start = null, date_end = null } = {}) {
+  const existing = hubs.phase.find((e) => e.title.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    selectedBelong.phase.set(existing.id, existing);
+    pinnedPhaseIds.add(existing.id);
+    return existing;
+  }
+
+  const startN = storedToSignedYear(date_start);
+  const endN = storedToSignedYear(date_end);
+  const periodIdSet = new Set(autoAssignPeriodsForRange(startN, endN).map((p) => p.id));
+  for (const id of selectedBelong.period.keys()) periodIdSet.add(id);
+
+  const created = await api.createEntity({
+    type: "phase",
+    title: name,
+    summary: null,
+    date_start: date_start ?? null,
+    date_end: date_end ?? null,
+    tags: [],
+    attachments: [],
+    period_ids: [...periodIdSet],
+    country_ids: [],
+    figure_ids: [],
+    link_ids: [],
+  });
+  hubs.phase.push(created);
+  hubs.phase.sort((a, b) => a.title.localeCompare(b.title));
+  selectedBelong.phase.set(created.id, created);
+  pinnedPhaseIds.add(created.id);
+  return created;
+}
+
+async function ensureTyped(kind, name) {
+  if (kind === "period") return ensurePeriod(name);
+  const existing = hubs[kind].find((e) => e.title.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    selectedBelong[kind].set(existing.id, existing);
+    return existing;
+  }
+  const created = await api.createEntity({
+    type: kind,
+    title: name,
+    summary: null,
+    tags: [],
+    attachments: [],
+    period_ids: [],
+    country_ids: [],
+    figure_ids: [],
+    link_ids: [],
+  });
+  hubs[kind].push(created);
+  hubs[kind].sort((a, b) => a.title.localeCompare(b.title));
+  selectedBelong[kind].set(created.id, created);
+  return created;
+}
+
+async function pickFromCatalog(kind, name, flag) {
+  try {
+    if (kind === "country") {
+      await setPrimaryPlace(name, flag);
+      const search = document.getElementById("belong-search-country");
+      if (search) search.value = "";
+      return;
+    }
+    if (kind === "empire") {
+      const place = primaryPlace();
+      if (!place || isWorldTitle(place.title)) {
+        toast("Pick a country first to add an empire");
+        return;
+      }
+      const already = selectedEmpires().find((e) => e.title.toLowerCase() === name.toLowerCase());
+      if (already) {
+        selectedBelong.country.delete(already.id);
+        refreshBelongUI();
+        return;
+      }
+      await ensureEmpire(name, flag || "🏛️");
+      refreshBelongUI();
+      return;
+    }
+    if (kind === "period") {
+      await setPrimaryPeriod(name);
+      const search = document.getElementById("belong-search-period");
+      if (search) search.value = "";
+      return;
+    }
+    if (kind === "figure") {
+      if (!hasPlaceContext()) {
+        toast("Pick a country or World first");
+        return;
+      }
+      await ensureTyped("figure", name);
+      const search = document.getElementById("belong-search-actor");
+      if (search) search.value = "";
+      refreshBelongUI();
+    }
+  } catch (err) {
+    toast(err.message || "Could not add");
+  }
+}
+
+function renderRelatedChips() {
   const box = document.getElementById("link-chips");
   if (!box) return;
-  if (selectedLinks.size === 0) {
+  if (selectedRelated.size === 0) {
     box.innerHTML = `<span class="text-xs text-ink-faint">No related events yet</span>`;
     return;
   }
-  box.innerHTML = [...selectedLinks.values()]
+  box.innerHTML = [...selectedRelated.values()]
     .map(
       (e) => `
       <button type="button" data-unlink="${e.id}" class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-accent-soft text-accent-dark text-xs font-medium">
@@ -36,8 +1338,8 @@ function renderLinkChips() {
     .join("");
   box.querySelectorAll("[data-unlink]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      selectedLinks.delete(btn.dataset.unlink);
-      renderLinkChips();
+      selectedRelated.delete(btn.dataset.unlink);
+      renderRelatedChips();
     });
   });
 }
@@ -53,7 +1355,7 @@ function renderAtResults(query) {
     return;
   }
   const hits = allEvents
-    .filter((e) => !selectedLinks.has(e.id))
+    .filter((e) => !selectedRelated.has(e.id))
     .filter((e) => e.title.toLowerCase().includes(q) || (e.summary || "").toLowerCase().includes(q))
     .slice(0, 8);
   if (!hits.length) {
@@ -72,10 +1374,9 @@ function renderAtResults(query) {
     btn.addEventListener("click", () => {
       const ent = allEvents.find((x) => x.id === btn.dataset.pick);
       if (ent) {
-        selectedLinks.set(ent.id, ent);
-        const input = document.getElementById("at-search");
-        if (input) input.value = "";
-        renderLinkChips();
+        selectedRelated.set(ent.id, ent);
+        document.getElementById("at-search").value = "";
+        renderRelatedChips();
         renderAtResults("");
       }
     });
@@ -130,118 +1431,388 @@ function renderTagChips(tags) {
   });
 }
 
-export async function openQuickAdd({ onSaved } = {}) {
-  const entities = await api.listEntities({ type: "event" });
-  allEvents = entities;
-  selectedLinks = new Map();
-  attachments = [];
-  const tags = [];
+function periodDateBlock(fromParts, toParts = null) {
+  const to = toParts || { year: "", month: "", day: "", era: fromParts.era || "ac" };
+  return `
+    <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
+      <div>
+        <p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold">Event dates</p>
+        <p id="date-period-hint" class="text-xs text-ink-faint">Set From / To with AC or BC — periods map from the range.</p>
+      </div>
+      <div>
+        <p class="text-xs font-medium text-ink-muted mb-1">From</p>
+        <div class="grid grid-cols-3 gap-2">
+          <input id="qa-from-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(fromParts.day)}" />
+          <input id="qa-from-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(fromParts.month)}" />
+          <input id="qa-from-year" class="input" type="number" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
+        </div>
+        <div class="flex gap-3 mt-1.5">
+          <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+            <input type="radio" name="qa-from-era" value="ac" ${fromParts.era !== "bc" ? "checked" : ""} class="accent-accent" /> AC
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+            <input type="radio" name="qa-from-era" value="bc" ${fromParts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
+          </label>
+        </div>
+      </div>
+      <div>
+        <p class="text-xs font-medium text-ink-muted mb-1">To <span class="font-normal text-ink-faint">(optional)</span></p>
+        <div class="grid grid-cols-3 gap-2">
+          <input id="qa-to-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(to.day)}" />
+          <input id="qa-to-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(to.month)}" />
+          <input id="qa-to-year" class="input" type="number" placeholder="Year" value="${escapeHtml(to.year)}" />
+        </div>
+        <div class="flex gap-3 mt-1.5">
+          <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+            <input type="radio" name="qa-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} class="accent-accent" /> AC
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+            <input type="radio" name="qa-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
+          </label>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function belongStep(step, stepNum, label, placeholder, catalogHeight = "max-h-40", { dateParts = null, dateEndParts = null } = {}) {
+  const stepLabel = stepNum
+    ? `<span class="text-ink-faint font-normal mr-1">${stepNum}.</span>${label}`
+    : label;
+  const showLock = step !== "country" && step !== "period" && step !== "phase";
+  const dateBlock = step === "period" && dateParts ? periodDateBlock(dateParts, dateEndParts) : "";
+  return `
+    <div id="belong-step-${step}" class="rounded-xl border border-paper-line p-3 bg-white space-y-3">
+      <div>
+        <div class="flex items-baseline justify-between gap-2 mb-1">
+          <label class="label mb-0" for="belong-search-${step}">${stepLabel}</label>
+          <span id="belong-lock-${step}" class="text-[11px] text-ink-faint ${showLock ? "" : "hidden"}">Needs country first</span>
+        </div>
+        <input id="belong-search-${step}" class="input w-full" placeholder="${placeholder}" autocomplete="off" />
+        <div id="belong-catalog-${step}" class="mt-2 ${catalogHeight} overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
+        <div id="belong-chips-${step}" class="flex flex-wrap gap-1.5 mt-2"></div>
+      </div>
+      ${dateBlock}
+    </div>
+  `;
+}
+
+export async function openQuickAdd({
+  onSaved,
+  editEntity = null,
+  neighbors = null,
+  preselectFigures = [],
+  preselectPeriod = null,
+  preselectPhase = null,
+} = {}) {
+  const isEdit = Boolean(editEntity?.id);
+  let events;
+  let periods;
+  let phases;
+  let places;
+  let figures;
+  let catalogData = { countries: [], empires: [], periods: [], figures: [] };
+  try {
+    [events, periods, phases, places, figures, catalogData] = await Promise.all([
+      api.listEntities({ type: "event" }),
+      api.listEntities({ type: "period" }),
+      api.listEntities({ type: "phase" }),
+      api.listEntities({ type: "place" }),
+      api.listEntities({ type: "figure" }),
+      api.catalog().catch(() => ({ countries: [], empires: [], periods: [], figures: [] })),
+    ]);
+  } catch (err) {
+    toast(err.message || "Could not open Add event");
+    throw err;
+  }
+  allEvents = events.filter((e) => !isEdit || e.id !== editEntity.id);
+  hubs = { period: periods, phase: phases, country: places, figure: figures };
+  catalog = {
+    countries: catalogData?.countries || [],
+    empires: catalogData?.empires || [],
+    periods: catalogData?.periods || [],
+    figures: catalogData?.figures || [],
+  };
+  selectedRelated = new Map();
+  selectedBelong = { period: new Map(), phase: new Map(), country: new Map(), figure: new Map() };
+  pinnedPeriodIds = new Set();
+  pinnedPhaseIds = new Set();
+  attachments = isEdit ? [...(editEntity.attachments || [])] : [];
+  const tags = isEdit ? [...(editEntity.tags || [])] : [];
+
+  if (isEdit && neighbors) {
+    const related = neighbors.related || {};
+    for (const item of related.period || []) {
+      selectedBelong.period.set(item.entity.id, item.entity);
+      pinnedPeriodIds.add(item.entity.id);
+    }
+    for (const item of related.phase || []) {
+      selectedBelong.phase.set(item.entity.id, item.entity);
+      pinnedPhaseIds.add(item.entity.id);
+    }
+    for (const item of related.place || []) {
+      selectedBelong.country.set(item.entity.id, item.entity);
+    }
+    normalizeToSingleCountry();
+    for (const item of related.figure || []) {
+      selectedBelong.figure.set(item.entity.id, item.entity);
+    }
+    for (const item of related.event || []) {
+      if (item.direction === "out" || item.relation === "related_to") {
+        selectedRelated.set(item.entity.id, item.entity);
+      }
+    }
+    for (const item of neighbors.backlinks || []) {
+      if (item.entity.type === "event") {
+        selectedRelated.set(item.entity.id, item.entity);
+      }
+    }
+  }
+
+  for (const fig of preselectFigures || []) {
+    if (!fig?.id) continue;
+    selectedBelong.figure.set(fig.id, fig);
+    if (!hubs.figure.some((f) => f.id === fig.id)) {
+      hubs.figure.push(fig);
+    }
+  }
+
+  if (!isEdit && preselectPeriod?.id) {
+    selectedBelong.period.set(preselectPeriod.id, preselectPeriod);
+    pinnedPeriodIds.add(preselectPeriod.id);
+    if (!hubs.period.some((p) => p.id === preselectPeriod.id)) {
+      hubs.period.push(preselectPeriod);
+    }
+  }
+
+  if (!isEdit && preselectPhase?.id) {
+    selectedBelong.phase.set(preselectPhase.id, preselectPhase);
+    pinnedPhaseIds.add(preselectPhase.id);
+    if (!hubs.phase.some((p) => p.id === preselectPhase.id)) {
+      hubs.phase.push(preselectPhase);
+    }
+  }
+
+  const dateParts = isEdit ? splitDateParts(editEntity.date_start) : { year: "", month: "", day: "", era: "ac" };
+  const dateEndParts = isEdit
+    ? splitDateParts(editEntity.date_end)
+    : { year: "", month: "", day: "", era: "ac" };
+  const eraSeed = preselectPhase || preselectPeriod;
+  if (!isEdit && eraSeed?.id) {
+    const meta = periodMetaFor(eraSeed);
+    if (meta?.end_year != null && meta.end_year < 0) {
+      dateParts.era = "bc";
+      dateEndParts.era = "bc";
+    } else if (meta?.start_year != null && meta.start_year > 0) {
+      dateParts.era = "ac";
+      dateEndParts.era = "ac";
+    }
+  }
 
   const panel = document.getElementById("modal-panel");
+  const contextNote = !isEdit
+    ? (preselectFigures || [])[0]?.title
+      ? ` · for ${(preselectFigures || [])[0].title}`
+      : preselectPhase?.title
+        ? ` · in ${preselectPhase.title}`
+        : preselectPeriod?.title
+          ? ` · in ${preselectPeriod.title}`
+          : ""
+    : "";
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">Add event</h2>
-        <p class="text-sm text-ink-muted mt-0.5">Only a title is required — everything else is optional.</p>
+        <h2 class="font-display text-xl">${isEdit ? "Edit event" : "Add event"}</h2>
+        <p id="wizard-sub" class="text-sm text-ink-muted mt-0.5">Step 1 of 2 — title, country &amp; figures${escapeHtml(contextNote)}</p>
       </div>
       <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
     </div>
+
+    <div class="flex gap-2 mb-5" aria-hidden="true">
+      <div id="wizard-dot-1" class="h-1 flex-1 rounded-full bg-accent"></div>
+      <div id="wizard-dot-2" class="h-1 flex-1 rounded-full bg-paper-line"></div>
+    </div>
+
     <form id="quick-add-form" class="space-y-4">
-      <div>
-        <label class="label" for="qa-title">Title</label>
-        <input id="qa-title" class="input" required maxlength="500" placeholder="What happened?" autofocus />
-      </div>
-
-      <div>
-        <label class="label">Date <span class="font-normal text-ink-faint">(optional)</span></label>
-        <div class="grid grid-cols-3 gap-2 mb-2">
-          <div>
-            <input id="qa-day" class="input" type="number" min="1" max="31" placeholder="Day" />
-          </div>
-          <div>
-            <input id="qa-month" class="input" type="number" min="1" max="12" placeholder="Month" />
-          </div>
-          <div>
-            <input id="qa-year" class="input" type="number" placeholder="Year" />
+      <div id="wizard-step-1" class="space-y-4">
+        <div>
+          <label class="label" for="qa-title">What happened?</label>
+          <input id="qa-title" class="input text-lg" required maxlength="500" placeholder="e.g. Union of the Principalities" value="${escapeHtml(isEdit ? editEntity.title : "")}" autofocus />
+        </div>
+        <div>
+          <p class="text-xs text-ink-faint mb-2">Country defaults to World. Pick a country to unlock its empires. Figures are optional.</p>
+          <div class="space-y-3">
+            ${belongStep("country", "", "Country / World", "Search countries…", "max-h-40")}
+            ${belongStep("actor", "", "Figures", "Search your figures, or type a name to add…", "max-h-48")}
           </div>
         </div>
-        <div class="flex gap-2">
-          <label class="flex-1 flex items-center justify-center gap-2 rounded-lg border border-paper-line px-3 py-2 text-sm cursor-pointer has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
-            <input type="radio" name="qa-era" value="ac" checked class="accent-accent" />
-            AC
-          </label>
-          <label class="flex-1 flex items-center justify-center gap-2 rounded-lg border border-paper-line px-3 py-2 text-sm cursor-pointer has-[:checked]:border-accent has-[:checked]:bg-accent-soft">
-            <input type="radio" name="qa-era" value="bc" class="accent-accent" />
-            BC
-          </label>
-        </div>
-        <p class="text-[11px] text-ink-faint mt-1.5">Year alone is fine. Day/month optional. Board sorts by date automatically.</p>
-      </div>
-
-      <div>
-        <label class="label" for="qa-note">Note <span class="font-normal text-ink-faint">(optional)</span></label>
-        <textarea id="qa-note" class="textarea" placeholder="Short note about this event…"></textarea>
-      </div>
-
-      <div>
-        <label class="label" for="at-search">Related (@) <span class="font-normal text-ink-faint">(optional)</span></label>
-        <input id="at-search" class="input" placeholder="Type @ or search to link events…" autocomplete="off" />
-        <div id="at-results" class="mt-1 max-h-28 overflow-y-auto"></div>
-        <div id="link-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
-      </div>
-
-      <div>
-        <label class="label" for="tag-input">Tags <span class="font-normal text-ink-faint">(optional)</span></label>
-        <div class="flex gap-2">
-          <input id="tag-input" class="input flex-1" placeholder="#europe or europe — Enter to add" />
-          <button type="button" id="tag-add" class="btn-secondary px-3">Add</button>
-        </div>
-        <div id="tag-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
-      </div>
-
-      <div>
-        <label class="label">Place <span class="font-normal text-ink-faint">(optional)</span></label>
-        <div class="space-y-2">
-          <input id="qa-place-name" class="input" placeholder="Location name" maxlength="500" />
-          <input id="qa-place-url" class="input" placeholder="Google Earth / map URL" maxlength="2000" />
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+          <button type="button" id="wizard-next" class="btn-primary px-5 py-2.5">Continue</button>
         </div>
       </div>
 
-      <div>
-        <label class="label">Files <span class="font-normal text-ink-faint">(links / paths — optional)</span></label>
-        <div class="flex gap-2">
-          <input id="file-input" class="input flex-1" placeholder="Paste a URL or file path" />
-          <button type="button" id="file-add" class="btn-secondary px-3">Add</button>
+      <div id="wizard-step-2" class="space-y-4 hidden">
+        <div>
+          <p id="belong-hint" class="text-xs text-ink-faint mt-0 mb-2">Enter dates to auto-map, or search to add periods and phases.</p>
+          ${periodDateBlock(dateParts, dateEndParts)}
+          <div class="mt-3 space-y-3">
+            ${belongStep("period", "", "Periods", "Search periods, or type a name to create…", "max-h-40")}
+            ${belongStep("phase", "", "Phases", "Search phases, or type a name to create…", "max-h-40")}
+          </div>
         </div>
-        <div id="file-list" class="mt-2 space-y-1"></div>
-      </div>
 
-      <div class="flex justify-end gap-2 pt-1">
-        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
-        <button type="submit" class="btn-primary px-4 py-2">Save event</button>
+        <div>
+          <label class="label" for="qa-note">Note <span class="font-normal text-ink-faint">(optional)</span></label>
+          <textarea id="qa-note" class="textarea" placeholder="Short note…">${escapeHtml(isEdit ? editEntity.summary || "" : "")}</textarea>
+        </div>
+
+        <div>
+          <label class="label" for="at-search">Related events (@)</label>
+          <input id="at-search" class="input" placeholder="Type @ or search…" autocomplete="off" />
+          <div id="at-results" class="mt-1 max-h-28 overflow-y-auto"></div>
+          <div id="link-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
+        </div>
+
+        <div>
+          <label class="label" for="tag-input">Tags</label>
+          <div class="flex gap-2">
+            <input id="tag-input" class="input flex-1" placeholder="#europe — Enter to add" />
+            <button type="button" id="tag-add" class="btn-secondary px-3">Add</button>
+          </div>
+          <div id="tag-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
+        </div>
+
+        <div>
+          <label class="label">Map pin</label>
+          <div class="space-y-2">
+            <input id="qa-place-name" class="input" placeholder="Location name" maxlength="500" value="${escapeHtml(isEdit ? editEntity.place_name || "" : "")}" />
+            <input id="qa-place-url" class="input" placeholder="Google Earth / map URL" maxlength="2000" value="${escapeHtml(isEdit ? editEntity.place_url || "" : "")}" />
+          </div>
+        </div>
+
+        <div>
+          <label class="label">Files</label>
+          <div class="flex gap-2">
+            <input id="file-input" class="input flex-1" placeholder="Paste a URL or file path" />
+            <button type="button" id="file-add" class="btn-secondary px-3">Add</button>
+          </div>
+          <div id="file-list" class="mt-2 space-y-1"></div>
+        </div>
+
+        <div class="flex justify-between gap-2 pt-1">
+          <button type="button" id="wizard-back" class="btn-ghost">Back</button>
+          <button type="submit" class="btn-primary px-5 py-2.5">${isEdit ? "Save changes" : "Save event"}</button>
+        </div>
       </div>
     </form>
   `;
 
-  renderLinkChips();
+  let wizardStep = 1;
+  function showWizardStep(n) {
+    wizardStep = n;
+    document.getElementById("wizard-step-1")?.classList.toggle("hidden", n !== 1);
+    document.getElementById("wizard-step-2")?.classList.toggle("hidden", n !== 2);
+    const sub = document.getElementById("wizard-sub");
+    if (sub) {
+      const figNote =
+        !isEdit && (preselectFigures || []).length ? ` · for ${preselectFigures[0].title}` : "";
+      const hubNote =
+        !figNote && !isEdit && (preselectPhase?.title || preselectPeriod?.title)
+          ? ` · in ${preselectPhase?.title || preselectPeriod.title}`
+          : "";
+      sub.textContent =
+        n === 1
+          ? `Step 1 of 2 — title, country & figures${figNote}${hubNote}`
+          : "Step 2 of 2 — dates & details";
+    }
+    document.getElementById("wizard-dot-1")?.classList.toggle("bg-accent", true);
+    document.getElementById("wizard-dot-1")?.classList.toggle("bg-paper-line", false);
+    const dot2 = document.getElementById("wizard-dot-2");
+    if (dot2) {
+      dot2.classList.toggle("bg-accent", n === 2);
+      dot2.classList.toggle("bg-paper-line", n !== 2);
+    }
+    if (n === 1) {
+      queueMicrotask(() => document.getElementById("qa-title")?.focus());
+    } else {
+      autoAssignPeriodsFromEventDates();
+      refreshBelongUI();
+      queueMicrotask(() => document.getElementById("qa-from-year")?.focus());
+    }
+  }
+
+  function goToStep2() {
+    const title = document.getElementById("qa-title")?.value.trim();
+    if (!title) {
+      toast("Add a title first");
+      document.getElementById("qa-title")?.focus();
+      return;
+    }
+    if (!hasPlaceContext()) {
+      toast("Pick a country or World first");
+      syncBelongHint();
+      return;
+    }
+    showWizardStep(2);
+  }
+
+  if (!isEdit) {
+    try {
+      await setPrimaryPlace("World", "🌍");
+    } catch (err) {
+      toast(err.message || "Could not set World");
+    }
+  }
+  ["country", "actor", "period", "phase"].forEach((step) => {
+    const search = document.getElementById(`belong-search-${step}`);
+    if (!search) return;
+    search.addEventListener("input", () => {
+      if (step === "country") renderCountryCatalog();
+      else if (step === "actor") renderActorCatalog();
+      else if (step === "period") renderPeriodCatalog();
+      else renderPhaseCatalog();
+    });
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const cat = document.getElementById(`belong-catalog-${step}`);
+        const createBtn = cat?.querySelector(
+          "[data-create-typed-figure], [data-create-typed-period], [data-create-typed-phase]"
+        );
+        const pickBtn = cat?.querySelector("[data-pick-existing], [data-pick-kind]");
+        (createBtn || pickBtn)?.click();
+      }
+    });
+  });
+
+  refreshBelongUI();
+  renderRelatedChips();
   renderAttachments();
   renderTagChips(tags);
+  showWizardStep(1);
   openModal();
-  queueMicrotask(() => document.getElementById("qa-title")?.focus());
+
+  document.getElementById("wizard-next")?.addEventListener("click", goToStep2);
+  document.getElementById("wizard-back")?.addEventListener("click", () => showWizardStep(1));
+  document.getElementById("qa-title")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      goToStep2();
+    }
+  });
 
   const atSearch = document.getElementById("at-search");
   atSearch.addEventListener("input", (e) => renderAtResults(e.target.value));
   atSearch.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      const first = document.querySelector("#at-results [data-pick]");
-      if (first) first.click();
+      document.querySelector("#at-results [data-pick]")?.click();
     }
   });
 
   function addTag() {
-    const raw = document.getElementById("tag-input").value;
-    const t = normalizeTag(raw);
+    const t = normalizeTag(document.getElementById("tag-input").value);
     if (!t) return;
     if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
     document.getElementById("tag-input").value = "";
@@ -270,44 +1841,539 @@ export async function openQuickAdd({ onSaved } = {}) {
     }
   });
 
+  document.getElementById("qa-from-year")?.addEventListener("change", () => {
+    onEventDateFieldsChanged();
+  });
+  document.getElementById("qa-from-year")?.addEventListener("blur", () => {
+    onEventDateFieldsChanged();
+  });
+  document.getElementById("qa-to-year")?.addEventListener("change", () => {
+    onEventDateFieldsChanged();
+  });
+  document.getElementById("qa-to-year")?.addEventListener("blur", () => {
+    onEventDateFieldsChanged();
+  });
+  document.querySelectorAll('input[name="qa-from-era"], input[name="qa-to-era"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      const cleared = clearPeriodIfEraMismatch();
+      if (cleared) {
+        toast(
+          selectedEra() === "bc"
+            ? "Cleared period — it doesn’t include BC years"
+            : "Cleared period — it doesn’t include AC years"
+        );
+      }
+      onEventDateFieldsChanged();
+    });
+  });
+
   document.getElementById("quick-add-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const year = document.getElementById("qa-year").value;
-    const month = document.getElementById("qa-month").value;
-    const day = document.getElementById("qa-day").value;
-    const era = document.querySelector('input[name="qa-era"]:checked')?.value || "ac";
-
-    if ((month || day) && !String(year).trim()) {
-      toast("Add a year if you set month or day");
+    if (wizardStep !== 2) {
+      goToStep2();
+      return;
+    }
+    if (!hasPlaceContext()) {
+      toast("Pick a country or World first");
+      showWizardStep(1);
+      syncBelongHint();
       return;
     }
 
-    const date_start = composeDate(year, month, day, era);
-    const note = document.getElementById("qa-note").value.trim();
-    const placeName = document.getElementById("qa-place-name").value.trim();
-    const placeUrl = document.getElementById("qa-place-url").value.trim();
+    const from = readEventDateSide("qa-from");
+    const to = readEventDateSide("qa-to");
+    if (from.error) {
+      toast(from.error);
+      return;
+    }
+    if (to.error) {
+      toast(to.error);
+      return;
+    }
+    if (from.signed != null && to.signed != null && from.signed > to.signed) {
+      toast("From must be earlier than To");
+      return;
+    }
+    if (to.stored && !from.stored) {
+      toast("Set From before To");
+      return;
+    }
+
+    if (from.signed != null) {
+      autoAssignPeriodsFromEventDates();
+    }
 
     const body = {
-      type: "event",
       title: document.getElementById("qa-title").value.trim(),
-      summary: note || null,
-      body: null,
-      date_start,
-      date_end: null,
-      parent_id: null,
+      summary: document.getElementById("qa-note").value.trim() || null,
+      date_start: from.stored,
+      date_end: to.stored,
       tags: [...tags],
-      place_name: placeName || null,
-      place_url: placeUrl || null,
+      place_name: document.getElementById("qa-place-name").value.trim() || null,
+      place_url: document.getElementById("qa-place-url").value.trim() || null,
       attachments: [...attachments],
-      link_ids: [...selectedLinks.keys()],
+      period_ids: [...selectedBelong.period.keys()],
+      phase_ids: [...selectedBelong.phase.keys()],
+      country_ids: [...selectedBelong.country.keys()],
+      figure_ids: [...selectedBelong.figure.keys()],
+      figure_roles: {},
+      link_ids: [...selectedRelated.keys()],
       link_relation: "related_to",
     };
 
     try {
-      const created = await api.createEntity(body);
-      toast(`Added “${created.title}”`);
+      let saved;
+      if (isEdit) {
+        saved = await api.updateEntity(editEntity.id, body);
+        toast(`Updated “${saved.title}”`);
+      } else {
+        saved = await api.createEntity({ type: "event", ...body, body: null, parent_id: null });
+        const periodNames = [...selectedBelong.period.values()].map((p) => p.title);
+        toast(
+          periodNames.length
+            ? `Added “${saved.title}” · ${periodNames.join(", ")}`
+            : `Added “${saved.title}”`
+        );
+      }
       closeModal();
-      if (onSaved) onSaved(created);
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not save");
+    }
+  });
+}
+
+export async function openEditEvent(entityId, { onSaved } = {}) {
+  const neighbors = await api.neighbors(entityId);
+  if (neighbors.entity.type !== "event") {
+    toast("Only events can be edited in this form");
+    return;
+  }
+  return openQuickAdd({
+    editEntity: neighbors.entity,
+    neighbors,
+    onSaved,
+  });
+}
+
+/** Edit figure biography: name, summary, body, birth/death. */
+export async function openEditFigure(figure, { onSaved } = {}) {
+  const birth = splitDateParts(figure.date_start);
+  const death = splitDateParts(figure.date_end);
+  const panel = document.getElementById("modal-panel");
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Edit biography</h2>
+        <p class="text-sm text-ink-muted mt-0.5">${escapeHtml(figure.title)}</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="fig-form" class="space-y-4">
+      <div>
+        <label class="label" for="fig-title">Name</label>
+        <input id="fig-title" class="input" required maxlength="500" value="${escapeHtml(figure.title)}" />
+      </div>
+      <div>
+        <label class="label" for="fig-summary">Short bio</label>
+        <textarea id="fig-summary" class="textarea" placeholder="One or two sentences…">${escapeHtml(figure.summary || "")}</textarea>
+      </div>
+      <div>
+        <label class="label" for="fig-body">Full biography</label>
+        <textarea id="fig-body" class="textarea min-h-[140px]" placeholder="Longer notes (markdown)…">${escapeHtml(figure.body || "")}</textarea>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Birth</label>
+          <div class="flex gap-2 items-center">
+            <input id="fig-birth-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(birth.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-birth-era" value="ac" ${birth.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-birth-era" value="bc" ${birth.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+        <div>
+          <label class="label">Death</label>
+          <div class="flex gap-2 items-center">
+            <input id="fig-death-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(death.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-death-era" value="ac" ${death.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-death-era" value="bc" ${death.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Save bio</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  document.getElementById("fig-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("fig-title").value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    const birthEra = document.querySelector('input[name="fig-birth-era"]:checked')?.value || "ac";
+    const deathEra = document.querySelector('input[name="fig-death-era"]:checked')?.value || "ac";
+    const birthYear = document.getElementById("fig-birth-year").value.trim();
+    const deathYear = document.getElementById("fig-death-year").value.trim();
+    try {
+      const saved = await api.updateEntity(figure.id, {
+        title,
+        summary: document.getElementById("fig-summary").value.trim() || null,
+        body: document.getElementById("fig-body").value.trim() || null,
+        date_start: composeDate(birthYear || null, null, null, birthEra),
+        date_end: composeDate(deathYear || null, null, null, deathEra),
+      });
+      toast(`Updated “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not save");
+    }
+  });
+}
+
+/** Edit period: name, summary, from/to years. */
+export async function openEditPeriod(period, { onSaved } = {}) {
+  const from = splitDateParts(period.date_start);
+  const to = splitDateParts(period.date_end);
+  const panel = document.getElementById("modal-panel");
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Edit period</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Set the From – To range for this era</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="period-form" class="space-y-4">
+      <div>
+        <label class="label" for="period-title">Name</label>
+        <input id="period-title" class="input" required maxlength="500" value="${escapeHtml(period.title)}" />
+      </div>
+      <div>
+        <label class="label" for="period-summary">Summary</label>
+        <textarea id="period-summary" class="textarea" placeholder="What defines this period…">${escapeHtml(period.summary || "")}</textarea>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label" for="period-from-year">From</label>
+          <div class="flex gap-2 items-center">
+            <input id="period-from-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+        <div>
+          <label class="label" for="period-to-year">To</label>
+          <div class="flex gap-2 items-center">
+            <input id="period-to-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Save period</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  document.getElementById("period-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("period-title").value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    const fromEra = document.querySelector('input[name="period-from-era"]:checked')?.value || "ac";
+    const toEra = document.querySelector('input[name="period-to-era"]:checked')?.value || "ac";
+    const fromYear = document.getElementById("period-from-year").value.trim();
+    const toYear = document.getElementById("period-to-year").value.trim();
+    if (!fromYear || !toYear) {
+      toast("Set both From and To years");
+      return;
+    }
+    const date_start = composeDate(fromYear, null, null, fromEra);
+    const date_end = composeDate(toYear, null, null, toEra);
+    const startN = storedToSignedYear(date_start);
+    const endN = storedToSignedYear(date_end);
+    if (startN != null && endN != null && startN > endN) {
+      toast("From must be earlier than To");
+      return;
+    }
+    try {
+      const saved = await api.updateEntity(period.id, {
+        title,
+        summary: document.getElementById("period-summary").value.trim() || null,
+        date_start,
+        date_end,
+      });
+      toast(`Updated “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not save");
+    }
+  });
+}
+
+/** Add phase: name, summary, from/to — auto-maps overlapping periods. */
+export async function openAddPhase({
+  onSaved,
+  preselectPeriod = null,
+  linkEvent = null,
+} = {}) {
+  try {
+    hubs.period = await api.listEntities({ type: "period" });
+  } catch {
+    hubs.period = hubs.period || [];
+  }
+
+  const seed = linkEvent || preselectPeriod;
+  const from = seed?.date_start
+    ? splitDateParts(seed.date_start)
+    : { year: "", month: "", day: "", era: "ac" };
+  const to = seed?.date_end
+    ? splitDateParts(seed.date_end)
+    : seed?.date_start
+      ? splitDateParts(seed.date_start)
+      : { year: "", month: "", day: "", era: from.era || "ac" };
+
+  const context =
+    preselectPeriod?.title
+      ? ` · in ${preselectPeriod.title}`
+      : linkEvent?.title
+        ? ` · for ${linkEvent.title}`
+        : "";
+
+  const panel = document.getElementById("modal-panel");
+  if (!panel) {
+    toast("Could not open form");
+    return;
+  }
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Add phase</h2>
+        <p class="text-sm text-ink-muted mt-0.5">A named span inside periods${escapeHtml(context)}</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="add-phase-form" class="space-y-4">
+      <div>
+        <label class="label" for="add-phase-name">Name</label>
+        <input id="add-phase-name" class="input text-lg" required maxlength="500" placeholder="e.g. Diadochi" autofocus autocomplete="off" />
+      </div>
+      <div>
+        <label class="label" for="add-phase-summary">Summary <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="add-phase-summary" class="textarea" placeholder="What defines this phase…"></textarea>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label" for="add-phase-from">From</label>
+          <div class="flex gap-2 items-center">
+            <input id="add-phase-from" class="input" inputmode="numeric" placeholder="Year" required value="${escapeHtml(from.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+        <div>
+          <label class="label" for="add-phase-to">To</label>
+          <div class="flex gap-2 items-center">
+            <input id="add-phase-to" class="input" inputmode="numeric" placeholder="Year" required value="${escapeHtml(to.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Create phase</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  queueMicrotask(() => document.getElementById("add-phase-name")?.focus());
+
+  document.getElementById("add-phase-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("add-phase-name")?.value.trim();
+    if (!title) {
+      toast("Enter a name");
+      return;
+    }
+    const fromEra = document.querySelector('input[name="add-phase-from-era"]:checked')?.value || "ac";
+    const toEra = document.querySelector('input[name="add-phase-to-era"]:checked')?.value || "ac";
+    const fromYear = document.getElementById("add-phase-from")?.value.trim();
+    const toYear = document.getElementById("add-phase-to")?.value.trim();
+    if (!fromYear || !toYear) {
+      toast("Set both From and To years");
+      return;
+    }
+    const date_start = composeDate(fromYear, null, null, fromEra);
+    const date_end = composeDate(toYear, null, null, toEra);
+    const startN = storedToSignedYear(date_start);
+    const endN = storedToSignedYear(date_end);
+    if (startN != null && endN != null && startN > endN) {
+      toast("From must be earlier than To");
+      return;
+    }
+
+    const periodIdSet = new Set(autoAssignPeriodsForRange(startN, endN).map((p) => p.id));
+    if (preselectPeriod?.id) periodIdSet.add(preselectPeriod.id);
+    if (linkEvent?.id) {
+      try {
+        const neighbors = await api.neighbors(linkEvent.id);
+        for (const item of neighbors.related?.period || []) {
+          periodIdSet.add(item.entity.id);
+        }
+      } catch {
+        /* keep overlap + preselect only */
+      }
+    }
+
+    try {
+      const saved = await api.createEntity({
+        type: "phase",
+        title,
+        summary: document.getElementById("add-phase-summary")?.value.trim() || null,
+        body: null,
+        date_start,
+        date_end,
+        parent_id: null,
+        tags: [],
+        attachments: [],
+        period_ids: [...periodIdSet],
+        country_ids: [],
+        figure_ids: [],
+        link_ids: [],
+      });
+
+      if (linkEvent?.id) {
+        try {
+          const neighbors = await api.neighbors(linkEvent.id);
+          const related = neighbors.related || {};
+          const period_ids = (related.period || []).map((item) => item.entity.id);
+          const phase_ids = [
+            ...new Set([
+              ...(related.phase || []).map((item) => item.entity.id),
+              saved.id,
+            ]),
+          ];
+          const country_ids = (related.place || []).map((item) => item.entity.id);
+          const figure_ids = (related.figure || []).map((item) => item.entity.id);
+          await api.updateEntity(linkEvent.id, {
+            period_ids,
+            phase_ids,
+            country_ids,
+            figure_ids,
+            figure_roles: {},
+          });
+        } catch (err) {
+          toast(err.message || "Phase created, but could not link the event");
+        }
+      }
+
+      toast(`Created “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not create phase");
+    }
+  });
+}
+
+/** Edit phase: name, summary, from/to — auto-maps overlapping periods. */
+export async function openEditPhase(phase, { onSaved } = {}) {
+  const from = splitDateParts(phase.date_start);
+  const to = splitDateParts(phase.date_end);
+  try {
+    hubs.period = await api.listEntities({ type: "period" });
+  } catch {
+    hubs.period = hubs.period || [];
+  }
+  const panel = document.getElementById("modal-panel");
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Edit phase</h2>
+        <p class="text-sm text-ink-muted mt-0.5">A named span inside periods — maps by date overlap</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="phase-form" class="space-y-4">
+      <div>
+        <label class="label" for="phase-title">Name</label>
+        <input id="phase-title" class="input" required maxlength="500" value="${escapeHtml(phase.title)}" />
+      </div>
+      <div>
+        <label class="label" for="phase-summary">Summary</label>
+        <textarea id="phase-summary" class="textarea" placeholder="What defines this phase…">${escapeHtml(phase.summary || "")}</textarea>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label" for="phase-from-year">From</label>
+          <div class="flex gap-2 items-center">
+            <input id="phase-from-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+        <div>
+          <label class="label" for="phase-to-year">To</label>
+          <div class="flex gap-2 items-center">
+            <input id="phase-to-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
+            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Save phase</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  document.getElementById("phase-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("phase-title").value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    const fromEra = document.querySelector('input[name="phase-from-era"]:checked')?.value || "ac";
+    const toEra = document.querySelector('input[name="phase-to-era"]:checked')?.value || "ac";
+    const fromYear = document.getElementById("phase-from-year").value.trim();
+    const toYear = document.getElementById("phase-to-year").value.trim();
+    if (!fromYear || !toYear) {
+      toast("Set both From and To years");
+      return;
+    }
+    const date_start = composeDate(fromYear, null, null, fromEra);
+    const date_end = composeDate(toYear, null, null, toEra);
+    const startN = storedToSignedYear(date_start);
+    const endN = storedToSignedYear(date_end);
+    if (startN != null && endN != null && startN > endN) {
+      toast("From must be earlier than To");
+      return;
+    }
+    const period_ids = autoAssignPeriodsForRange(startN, endN).map((p) => p.id);
+    try {
+      const saved = await api.updateEntity(phase.id, {
+        title,
+        summary: document.getElementById("phase-summary").value.trim() || null,
+        date_start,
+        date_end,
+        period_ids,
+      });
+      toast(`Updated “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
     } catch (err) {
       toast(err.message || "Could not save");
     }
@@ -321,6 +2387,323 @@ export function bindModalChrome() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeModal();
   });
+}
+
+/** Add a moment (sub-point) under a parent event. */
+export async function openAddMilestone(parentEvent, { onSaved } = {}) {
+  const panel = document.getElementById("modal-panel");
+  if (!panel) {
+    toast("Could not open form");
+    return;
+  }
+  const parentRange =
+    formatRange(parentEvent.date_start, parentEvent.date_end) ||
+    (parentEvent.date_start ? formatRange(parentEvent.date_start, null) : "");
+  const parentStart = storedToSignedYear(parentEvent.date_start);
+  const parentEnd = storedToSignedYear(parentEvent.date_end) ?? parentStart;
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Add moment</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Inside ${escapeHtml(parentEvent.title)}${
+          parentRange ? ` · must fall within ${escapeHtml(parentRange)}` : ""
+        }</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="milestone-form" class="space-y-4">
+      <div>
+        <label class="label" for="ms-title">What happened?</label>
+        <input id="ms-title" class="input text-lg" required maxlength="500" placeholder="e.g. Imperial Guard advances" autofocus />
+      </div>
+      <div>
+        <label class="label" for="ms-summary">Note <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="ms-summary" class="textarea" placeholder="Short note…"></textarea>
+      </div>
+      <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
+        <p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold">Date</p>
+        <div>
+          <p class="text-xs font-medium text-ink-muted mb-1">From</p>
+          <div class="grid grid-cols-3 gap-2">
+            <input id="ms-from-day" class="input" type="number" min="1" max="31" placeholder="Day" />
+            <input id="ms-from-month" class="input" type="number" min="1" max="12" placeholder="Month" />
+            <input id="ms-from-year" class="input" type="number" placeholder="Year" />
+          </div>
+          <div class="flex gap-3 mt-1.5">
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="ms-from-era" value="ac" checked class="accent-accent" /> AC
+            </label>
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="ms-from-era" value="bc" class="accent-accent" /> BC
+            </label>
+          </div>
+        </div>
+        <div>
+          <p class="text-xs font-medium text-ink-muted mb-1">To <span class="font-normal text-ink-faint">(optional)</span></p>
+          <div class="grid grid-cols-3 gap-2">
+            <input id="ms-to-day" class="input" type="number" min="1" max="31" placeholder="Day" />
+            <input id="ms-to-month" class="input" type="number" min="1" max="12" placeholder="Month" />
+            <input id="ms-to-year" class="input" type="number" placeholder="Year" />
+          </div>
+          <div class="flex gap-3 mt-1.5">
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="ms-to-era" value="ac" checked class="accent-accent" /> AC
+            </label>
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="ms-to-era" value="bc" class="accent-accent" /> BC
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Add moment</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  queueMicrotask(() => document.getElementById("ms-title")?.focus());
+
+  document.getElementById("milestone-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("ms-title")?.value.trim();
+    if (!title) {
+      toast("Add a title");
+      return;
+    }
+    const fromEra = document.querySelector('input[name="ms-from-era"]:checked')?.value || "ac";
+    const toEra = document.querySelector('input[name="ms-to-era"]:checked')?.value || "ac";
+    const fromY = document.getElementById("ms-from-year")?.value.trim();
+    const fromM = document.getElementById("ms-from-month")?.value;
+    const fromD = document.getElementById("ms-from-day")?.value;
+    const toY = document.getElementById("ms-to-year")?.value.trim();
+    const toM = document.getElementById("ms-to-month")?.value;
+    const toD = document.getElementById("ms-to-day")?.value;
+    if ((fromM || fromD) && !fromY) {
+      toast("Add a From year if you set month or day");
+      return;
+    }
+    if ((toM || toD) && !toY) {
+      toast("Add a To year if you set month or day");
+      return;
+    }
+    const date_start = composeDate(fromY || null, fromM, fromD, fromEra);
+    const date_end = composeDate(toY || null, toM, toD, toEra);
+    const startN = storedToSignedYear(date_start);
+    const endN = storedToSignedYear(date_end);
+    if (startN != null && endN != null && startN > endN) {
+      toast("From must be earlier than To");
+      return;
+    }
+    if (date_end && !date_start) {
+      toast("Set From before To");
+      return;
+    }
+    if ((startN != null || endN != null) && parentStart == null) {
+      toast("Set a From date on the event before adding a dated moment");
+      return;
+    }
+    if (parentStart != null) {
+      const lo = parentStart;
+      const hi = parentEnd ?? parentStart;
+      const outside = (y) => y != null && (y < lo || y > hi);
+      if (outside(startN) || outside(endN)) {
+        toast(
+          parentRange
+            ? `Moment must fall within the event (${parentRange})`
+            : "Moment must fall within the event’s date range"
+        );
+        return;
+      }
+    }
+    try {
+      const saved = await api.createEntity({
+        type: "milestone",
+        title,
+        summary: document.getElementById("ms-summary")?.value.trim() || null,
+        body: null,
+        date_start,
+        date_end,
+        parent_id: parentEvent.id,
+        tags: [],
+        attachments: [],
+        period_ids: [],
+        phase_ids: [],
+        country_ids: [],
+        figure_ids: [],
+        link_ids: [],
+      });
+      toast(`Added moment “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not create moment");
+    }
+  });
+}
+
+/** Create an empty topic (or with optional preselected members). */
+export async function openAddTopic({
+  onSaved,
+  preselectEventIds = [],
+  preselectPhaseIds = [],
+} = {}) {
+  const panel = document.getElementById("modal-panel");
+  if (!panel) return;
+  const nEvents = preselectEventIds.length;
+  const nPhases = preselectPhaseIds.length;
+  const memberNote =
+    nEvents || nPhases
+      ? `Will include ${[
+          nEvents ? `${nEvents} event${nEvents === 1 ? "" : "s"}` : "",
+          nPhases ? `${nPhases} phase${nPhases === 1 ? "" : "s"}` : "",
+        ]
+          .filter(Boolean)
+          .join(" and ")}.`
+      : "You can add events and phases to it afterward.";
+
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Create topic</h2>
+        <p class="text-sm text-ink-muted mt-0.5">${escapeHtml(memberNote)}</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="add-topic-form" class="space-y-4">
+      <div>
+        <label class="label" for="add-topic-name">Name</label>
+        <input id="add-topic-name" class="input text-lg" required maxlength="500" placeholder="e.g. Rise of Rome" autofocus autocomplete="off" />
+      </div>
+      <div>
+        <label class="label" for="add-topic-summary">Summary <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="add-topic-summary" class="textarea" placeholder="What this topic covers…"></textarea>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Create topic</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  queueMicrotask(() => document.getElementById("add-topic-name")?.focus());
+
+  document.getElementById("add-topic-form")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("add-topic-name")?.value.trim();
+    if (!title) {
+      toast("Enter a name");
+      return;
+    }
+    try {
+      const saved = await api.createTopic({
+        title,
+        summary: document.getElementById("add-topic-summary")?.value.trim() || null,
+        event_ids: [...preselectEventIds],
+        phase_ids: [...preselectPhaseIds],
+      });
+      toast(`Created “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+      else location.hash = `/entity/${saved.id}`;
+    } catch (err) {
+      toast(err.message || "Could not create topic");
+    }
+  });
+}
+
+/** Link existing events or phases into a topic. */
+export async function openAddToTopic(topic, { kind = "event", onSaved } = {}) {
+  const panel = document.getElementById("modal-panel");
+  if (!panel || !topic?.id) return;
+  const isPhase = kind === "phase";
+  const type = isPhase ? "phase" : "event";
+  let candidates = [];
+  let linked = new Set();
+  try {
+    const [list, neighbors] = await Promise.all([
+      api.listEntities({ type }),
+      api.neighbors(topic.id),
+    ]);
+    for (const item of neighbors.related?.[type] || []) linked.add(item.entity.id);
+    for (const item of neighbors.related?.milestone || []) linked.add(item.entity.id);
+    candidates = list
+      .filter((e) => !linked.has(e.id))
+      .slice()
+      .sort((a, b) => a.title.localeCompare(b.title));
+  } catch (err) {
+    toast(err.message || "Could not load items");
+    return;
+  }
+
+  const label = isPhase ? "phase" : "event";
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Add ${label} to topic</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Link into “${escapeHtml(topic.title)}”</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <input id="topic-member-q" class="input mb-3" placeholder="Search…" autocomplete="off" />
+    <div id="topic-member-list" class="max-h-72 overflow-y-auto rounded-lg border border-paper-line divide-y divide-paper-line"></div>
+    <div class="flex justify-end gap-2 pt-4">
+      <button type="button" class="btn-ghost" data-close-modal>Done</button>
+    </div>
+  `;
+  openModal();
+
+  const listEl = document.getElementById("topic-member-list");
+  const qEl = document.getElementById("topic-member-q");
+
+  function renderList() {
+    const q = (qEl?.value || "").trim().toLowerCase();
+    const hits = candidates.filter((e) => !q || e.title.toLowerCase().includes(q) || (e.summary || "").toLowerCase().includes(q));
+    if (!hits.length) {
+      listEl.innerHTML = `<p class="px-3 py-4 text-sm text-ink-faint">${
+        candidates.length === 0
+          ? `No ${label}s left to add — create one from the library first.`
+          : "No matches."
+      }</p>`;
+      return;
+    }
+    listEl.innerHTML = hits
+      .slice(0, 40)
+      .map(
+        (e) => `
+      <button type="button" data-add-member="${e.id}"
+        class="w-full text-left px-3 py-2.5 hover:bg-paper-deep text-sm flex items-center justify-between gap-2">
+        <span class="min-w-0">
+          <span class="font-medium block truncate">${escapeHtml(e.title)}</span>
+          ${e.summary ? `<span class="text-xs text-ink-faint line-clamp-1">${escapeHtml(e.summary)}</span>` : ""}
+        </span>
+        <span class="text-[11px] text-accent-dark shrink-0">Add</span>
+      </button>`
+      )
+      .join("");
+    listEl.querySelectorAll("[data-add-member]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.addMember;
+        try {
+          await api.createLink({
+            source_id: topic.id,
+            target_id: id,
+            relation: "part_of",
+          });
+          candidates = candidates.filter((e) => e.id !== id);
+          toast("Added to topic");
+          renderList();
+          if (onSaved) onSaved();
+        } catch (err) {
+          toast(err.message || "Could not add");
+        }
+      });
+    });
+  }
+
+  qEl?.addEventListener("input", renderList);
+  renderList();
+  queueMicrotask(() => qEl?.focus());
 }
 
 export { closeModal };

@@ -13,8 +13,11 @@ from app.models import (
     Entity,
     EntityCreate,
     EntityRead,
+    EntityType,
     EntityUpdate,
+    INVOLVE_ROLES,
     Link,
+    RelationType,
     ReviewState,
     utcnow,
 )
@@ -29,6 +32,53 @@ def _entity_read(e: Entity) -> EntityRead:
     if data.get("attachments") is None:
         data["attachments"] = []
     return EntityRead.model_validate(data)
+
+
+def _normalize_role(role: str | None) -> str | None:
+    if role is None:
+        return None
+    r = str(role).strip().lower()
+    if not r:
+        return None
+    if r not in INVOLVE_ROLES:
+        raise HTTPException(400, f"Invalid involve role: {role}")
+    return r
+
+
+def _add_typed_links(
+    session: Session,
+    source_id: str,
+    target_ids: list[str],
+    expected_type: EntityType,
+    relation: RelationType,
+    roles: dict[str, str] | None = None,
+) -> None:
+    roles = roles or {}
+    for tid in target_ids:
+        if tid == source_id:
+            continue
+        target = session.get(Entity, tid)
+        if not target:
+            raise HTTPException(404, f"Linked entity not found: {tid}")
+        if target.type != expected_type:
+            raise HTTPException(
+                400,
+                f"Expected {expected_type.value}, got {target.type.value} ({target.title})",
+            )
+        role = _normalize_role(roles.get(tid)) if relation == RelationType.involves else None
+        existing = session.exec(
+            select(Link).where(
+                Link.source_id == source_id,
+                Link.target_id == tid,
+                Link.relation == relation,
+            )
+        ).first()
+        if existing:
+            if relation == RelationType.involves and tid in roles:
+                existing.role = role
+                session.add(existing)
+            continue
+        session.add(Link(source_id=source_id, target_id=tid, relation=relation, role=role))
 
 
 @router.get("", response_model=list[EntityRead])
@@ -74,11 +124,31 @@ def get_entity(entity_id: str, session: Session = Depends(get_session)) -> Entit
 
 @router.post("", response_model=EntityRead, status_code=201)
 def create_entity(payload: EntityCreate, session: Session = Depends(get_session)) -> EntityRead:
-    data = payload.model_dump(exclude={"link_ids", "link_relation", "id"})
+    data = payload.model_dump(
+        exclude={
+            "link_ids",
+            "link_relation",
+            "id",
+            "period_ids",
+            "phase_ids",
+            "country_ids",
+            "figure_ids",
+            "figure_roles",
+        }
+    )
     if data.get("tags") is None:
         data["tags"] = []
     if data.get("attachments") is None:
         data["attachments"] = []
+
+    # Events must belong to at least one period, country, or figure
+    if payload.type == EntityType.event:
+        if not (payload.period_ids or payload.country_ids or payload.figure_ids):
+            raise HTTPException(
+                400,
+                "An event must belong to at least one period, country, or figure",
+            )
+
     entity = Entity(**data)
     if payload.id:
         entity.id = payload.id
@@ -87,11 +157,22 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
     session.add(entity)
     session.flush()
 
-    # Ensure review state row
     if session.get(ReviewState, entity.id) is None:
         session.add(ReviewState(entity_id=entity.id))
 
-    # Optional quick links from create payload
+    _add_typed_links(
+        session, entity.id, payload.period_ids, EntityType.period, RelationType.part_of
+    )
+    _add_typed_links(
+        session, entity.id, payload.phase_ids, EntityType.phase, RelationType.part_of
+    )
+    _add_typed_links(
+        session, entity.id, payload.country_ids, EntityType.place, RelationType.occurred_in
+    )
+    _add_typed_links(
+        session, entity.id, payload.figure_ids, EntityType.figure, RelationType.involves, payload.figure_roles
+    )
+
     for target_id in payload.link_ids:
         if target_id == entity.id:
             continue
@@ -119,14 +200,112 @@ def update_entity(
     entity = session.get(Entity, entity_id)
     if not entity:
         raise HTTPException(404, "Entity not found")
-    updates = payload.model_dump(exclude_unset=True)
+
+    updates = payload.model_dump(
+        exclude_unset=True,
+        exclude={
+            "period_ids",
+            "phase_ids",
+            "country_ids",
+            "figure_ids",
+            "figure_roles",
+            "link_ids",
+            "link_relation",
+        },
+    )
     for key, value in updates.items():
         setattr(entity, key, value)
     entity.updated_at = utcnow()
     session.add(entity)
+
+    # Replace belonging links when provided (events / phases linking to periods)
+    replacing_belong = any(
+        x is not None
+        for x in (payload.period_ids, payload.phase_ids, payload.country_ids, payload.figure_ids)
+    )
+    if replacing_belong:
+        if entity.type == EntityType.event:
+            period_ids = payload.period_ids if payload.period_ids is not None else []
+            phase_ids = payload.phase_ids if payload.phase_ids is not None else []
+            country_ids = payload.country_ids if payload.country_ids is not None else []
+            figure_ids = payload.figure_ids if payload.figure_ids is not None else []
+            if not (period_ids or country_ids or figure_ids):
+                raise HTTPException(
+                    400,
+                    "An event must belong to at least one period, country, or figure",
+                )
+            _replace_links_of_relations(
+                session,
+                entity_id,
+                [
+                    (RelationType.part_of, period_ids, EntityType.period, None),
+                    (RelationType.part_of, phase_ids, EntityType.phase, None),
+                    (RelationType.occurred_in, country_ids, EntityType.place, None),
+                    (
+                        RelationType.involves,
+                        figure_ids,
+                        EntityType.figure,
+                        payload.figure_roles if payload.figure_roles is not None else {},
+                    ),
+                ],
+            )
+        elif entity.type == EntityType.phase and payload.period_ids is not None:
+            _replace_links_of_relations(
+                session,
+                entity_id,
+                [
+                    (RelationType.part_of, payload.period_ids, EntityType.period, None),
+                ],
+            )
+
+    if payload.link_ids is not None:
+        # Replace related_to outgoing links
+        old = session.exec(
+            select(Link).where(
+                Link.source_id == entity_id,
+                Link.relation == payload.link_relation,
+            )
+        ).all()
+        for link in old:
+            session.delete(link)
+        session.flush()
+        for target_id in payload.link_ids:
+            if target_id == entity_id:
+                continue
+            if not session.get(Entity, target_id):
+                continue
+            session.add(
+                Link(
+                    source_id=entity_id,
+                    target_id=target_id,
+                    relation=payload.link_relation,
+                )
+            )
+
     session.commit()
     session.refresh(entity)
     return _entity_read(entity)
+
+
+def _replace_links_of_relations(
+    session: Session,
+    source_id: str,
+    specs: list[tuple[RelationType, list[str], EntityType, dict[str, str] | None]],
+) -> None:
+    """Replace outgoing links for each (relation, ids, expected_type) without
+    wiping other target types that share the same relation (e.g. period + phase part_of).
+    """
+    for relation, _ids, expected_type, _roles in specs:
+        old = session.exec(
+            select(Link).where(Link.source_id == source_id, Link.relation == relation)
+        ).all()
+        for link in old:
+            target = session.get(Entity, link.target_id)
+            if target is None or target.type == expected_type:
+                session.delete(link)
+    session.flush()
+    for relation, ids, expected_type, roles in specs:
+        _add_typed_links(session, source_id, ids, expected_type, relation, roles)
 
 
 @router.delete("/{entity_id}", status_code=204)
@@ -173,25 +352,37 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
     related: dict[str, list[dict]] = {}
     seen_in_related: set[str] = set()
 
-    def add_related(other: EntityRead, relation, direction: str, link_id: str | None) -> None:
+    def add_related(
+        other: EntityRead,
+        relation,
+        direction: str,
+        link_id: str | None,
+        role: str | None = None,
+    ) -> None:
         if other.id in seen_in_related or other.id == entity_id:
             return
         seen_in_related.add(other.id)
         bucket = other.type.value if hasattr(other.type, "value") else str(other.type)
         related.setdefault(bucket, []).append(
-            {"entity": other, "relation": relation, "direction": direction, "link_id": link_id}
+            {
+                "entity": other,
+                "relation": relation,
+                "direction": direction,
+                "link_id": link_id,
+                "role": role,
+            }
         )
 
     for link in outgoing:
         other = load(link.target_id)
         if other:
-            add_related(other, link.relation, "out", link.id)
+            add_related(other, link.relation, "out", link.id, getattr(link, "role", None))
 
     # Incoming links also populate hub groups (e.g. country → its events)
     for link in incoming:
         other = load(link.source_id)
         if other:
-            add_related(other, link.relation, "in", link.id)
+            add_related(other, link.relation, "in", link.id, getattr(link, "role", None))
 
     # Children via parent_id
     children = session.exec(select(Entity).where(Entity.parent_id == entity_id)).all()
@@ -204,15 +395,37 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
         if not other:
             continue
         backlinks.append(
-            {"entity": other, "relation": link.relation, "direction": "in", "link_id": link.id}
+            {
+                "entity": other,
+                "relation": link.relation,
+                "direction": "in",
+                "link_id": link.id,
+                "role": getattr(link, "role", None),
+            }
         )
 
     # Parent
     parent = load(entity.parent_id) if entity.parent_id else None
+
+    # Life timeline for figures: involves events, chronological
+    life_events = []
+    if entity.type == EntityType.figure:
+        for item in related.get("event", []):
+            rel = item.get("relation")
+            rel_s = rel.value if hasattr(rel, "value") else str(rel)
+            if rel_s == RelationType.involves.value:
+                life_events.append(item)
+        life_events.sort(
+            key=lambda item: (
+                date_sort_key(item["entity"].date_start),
+                item["entity"].title.lower(),
+            )
+        )
 
     return {
         "entity": _entity_read(entity),
         "parent": parent,
         "related": related,
         "backlinks": backlinks,
+        "life_events": life_events,
     }

@@ -8,7 +8,7 @@ import { syncProgressChrome } from "./progress-ui.js";
 import { renderHome } from "./views/home.js";
 import { renderLibrary } from "./views/library.js";
 import { renderEntity } from "./views/entity.js";
-import { renderTimeline } from "./views/timeline.js";
+import { renderTimeline, teardownTimeline } from "./views/timeline.js";
 import { renderFlashcards } from "./views/flashcards.js";
 import { renderQuiz } from "./views/quiz.js";
 import { renderSettings } from "./views/settings.js";
@@ -49,16 +49,20 @@ function bindShell() {
         refreshHeader();
         location.hash = `/entity/${created.id}`;
       },
+    }).catch((err) => {
+      console.error(err);
+      toast(err.message || "Could not open Add event");
     });
   });
 
   bindModalChrome();
 }
 
-route("/", ({ root }) => renderHome(root));
+route("/", ({ root, query }) => renderTimeline(root, { query }));
+route("/timeline", ({ root, query }) => renderTimeline(root, { query }));
+route("/progress", ({ root }) => renderHome(root));
 route("/library", ({ root, query }) => renderLibrary(root, { query }));
 route("/entity/:id", ({ root, params }) => renderEntity(root, { params }));
-route("/timeline", ({ root, query }) => renderTimeline(root, { query }));
 route("/flashcards", ({ root }) => renderFlashcards(root));
 route("/quiz", ({ root }) => renderQuiz(root));
 route("/settings", ({ root }) => renderSettings(root));
@@ -68,17 +72,19 @@ refreshHeader();
 
 startRouter(async ({ path, query, params, matched }) => {
   const root = view();
-  root.innerHTML = `<p class="text-ink-muted text-sm">Loading…</p>`;
+  teardownTimeline(root);
+  root.innerHTML = `<p class="text-ink-muted text-sm px-4 lg:px-8 py-6">Loading…</p>`;
   try {
     if (!matched) {
-      root.innerHTML = `<p class="text-ink-muted">Page not found. <a href="#/" class="text-accent underline">Home</a></p>`;
+      root.innerHTML = `<p class="text-ink-muted px-4">Page not found. <a href="#/" class="text-accent underline">World timeline</a></p>`;
       return;
     }
     await matched.handler({ root, path, query, params });
     refreshHeader();
   } catch (err) {
     console.error(err);
-    root.innerHTML = `<div class="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-800">
+    root.classList.remove("view-world-timeline");
+    root.innerHTML = `<div class="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-800 mx-4 lg:mx-8 my-6">
       <p class="font-medium">Something went wrong</p>
       <p class="text-sm mt-1">${err.message || err}</p>
     </div>`;

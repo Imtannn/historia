@@ -39,6 +39,7 @@ export const api = {
   deleteEntity: (id) => request(`/entities/${id}`, { method: "DELETE" }),
   listLinks: (entityId) => request(`/links${entityId ? `?entity_id=${entityId}` : ""}`),
   createLink: (body) => request("/links", { method: "POST", body: JSON.stringify(body) }),
+  updateLink: (id, body) => request(`/links/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteLink: (id) => request(`/links/${id}`, { method: "DELETE" }),
   export: () => request("/export"),
   import: (mode, payload) => request("/import", { method: "POST", body: JSON.stringify({ mode, payload }) }),
@@ -68,4 +69,5 @@ export const api = {
     return request(`/timeline${s ? `?${s}` : ""}`);
   },
   createTopic: (body) => request("/topics", { method: "POST", body: JSON.stringify(body) }),
+  catalog: () => request("/catalog"),
 };

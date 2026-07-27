@@ -2,10 +2,11 @@
 
 const TYPE_LABELS = {
   event: "Event",
-  place: "Place",
+  place: "Country / empire",
   figure: "Figure",
   period: "Period",
-  milestone: "Milestone",
+  phase: "Phase",
+  milestone: "Moment",
   timeline: "Timeline",
   topic: "Topic",
 };
@@ -45,6 +46,22 @@ export function composeDate(year, month, day, era = "ac") {
   if (m == null) return yearPart;
   if (d == null) return `${yearPart}-${String(m).padStart(2, "0")}`;
   return `${yearPart}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+/** Split stored date into form fields. */
+export function splitDateParts(value) {
+  const p = parseDate(value);
+  if (!p) return { year: "", month: "", day: "", era: "ac" };
+  const body = String(value || "").replace(/^-/, "");
+  const parts = body.split("-");
+  const hasMonth = parts.length >= 2 && /^\d+$/.test(parts[1]);
+  const hasDay = parts.length >= 3 && /^\d+$/.test(parts[2]);
+  return {
+    year: String(Math.abs(p.year)),
+    month: hasMonth ? String(parseInt(parts[1], 10)) : "",
+    day: hasDay ? String(parseInt(parts[2], 10)) : "",
+    era: p.year < 0 ? "bc" : "ac",
+  };
 }
 
 export function parseDate(value) {
@@ -98,7 +115,15 @@ export function formatDate(value) {
   const hasDay = parts.length >= 3 && /^\d+$/.test(parts[2]);
   if (hasDay && hasMonth) return `${parseInt(parts[2], 10)}/${parseInt(parts[1], 10)}/${absYear} ${era}`;
   if (hasMonth) return `${parseInt(parts[1], 10)}/${absYear} ${era}`;
-  return `${absYear} ${era}`;
+  return formatSignedYear(p.year);
+}
+
+/** Display a signed historic year (negative = BC). */
+export function formatSignedYear(year) {
+  if (year == null || year === "") return "";
+  const n = Math.round(Number(year));
+  if (!Number.isFinite(n)) return "";
+  return n < 0 ? `${Math.abs(n)} BC` : `${n} AC`;
 }
 
 export function formatRange(start, end) {
@@ -106,6 +131,21 @@ export function formatRange(start, end) {
   const b = formatDate(end);
   if (a && b) return `${a} – ${b}`;
   return a || b || "";
+}
+
+/** Signed year (negative = BC) → stored Historia date string. */
+export function signedYearToStored(year) {
+  if (year == null || year === "") return null;
+  const n = Number(year);
+  if (!Number.isFinite(n)) return null;
+  return composeDate(Math.abs(n), null, null, n < 0 ? "bc" : "ac");
+}
+
+/** Stored date → signed year, or null. */
+export function storedToSignedYear(value) {
+  const p = parseDate(value);
+  if (!p) return null;
+  return p.year;
 }
 
 export function normalizeTag(raw) {
@@ -149,4 +189,13 @@ export function entityMatches(entity, query) {
 
 export function relationLabel(rel) {
   return String(rel || "related").replace(/_/g, " ");
+}
+
+export function compareByDateThenTitle(a, b) {
+  const ka = dateSortKey(a?.date_start);
+  const kb = dateSortKey(b?.date_start);
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+  }
+  return String(a?.title || "").localeCompare(String(b?.title || ""));
 }

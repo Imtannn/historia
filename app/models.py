@@ -24,6 +24,7 @@ class EntityType(str, Enum):
     place = "place"
     figure = "figure"
     period = "period"
+    phase = "phase"
     milestone = "milestone"
     timeline = "timeline"
     topic = "topic"
@@ -62,8 +63,15 @@ class Entity(EntityBase, table=True):
 
 class EntityCreate(EntityBase):
     id: Optional[str] = None
-    link_ids: list[str] = Field(default_factory=list)  # target entity ids for quick-add links
+    link_ids: list[str] = Field(default_factory=list)  # related events (@)
     link_relation: RelationType = RelationType.related_to
+    # Required for events: belong to ≥1 period, country (place), or figure
+    period_ids: list[str] = Field(default_factory=list)
+    phase_ids: list[str] = Field(default_factory=list)
+    country_ids: list[str] = Field(default_factory=list)
+    figure_ids: list[str] = Field(default_factory=list)
+    # Optional involves roles: { figure_id: "fought" | "ruled" | … }
+    figure_roles: dict[str, str] = Field(default_factory=dict)
 
 
 class EntityUpdate(SQLModel):
@@ -78,6 +86,14 @@ class EntityUpdate(SQLModel):
     place_name: Optional[str] = None
     place_url: Optional[str] = None
     attachments: Optional[list[str]] = None
+    # When set on an event, replace belonging / related links
+    period_ids: Optional[list[str]] = None
+    phase_ids: Optional[list[str]] = None
+    country_ids: Optional[list[str]] = None
+    figure_ids: Optional[list[str]] = None
+    figure_roles: Optional[dict[str, str]] = None
+    link_ids: Optional[list[str]] = None
+    link_relation: RelationType = RelationType.related_to
 
 
 class EntityRead(EntityBase):
@@ -88,16 +104,23 @@ class EntityRead(EntityBase):
 
 class TopicCreate(SQLModel):
     title: str = Field(min_length=1, max_length=500)
+    summary: Optional[str] = Field(default=None, max_length=2000)
     event_ids: list[str] = Field(default_factory=list)
+    phase_ids: list[str] = Field(default_factory=list)
 
 
 # ---------- Link ----------
+
+
+# Optional role on involves (event → figure): born, died, ruled, fought, wrote, met, …
+INVOLVE_ROLES = ("born", "died", "ruled", "fought", "wrote", "met", "other")
 
 
 class LinkBase(SQLModel):
     source_id: str = Field(foreign_key="entity.id", index=True)
     target_id: str = Field(foreign_key="entity.id", index=True)
     relation: RelationType = RelationType.related_to
+    role: Optional[str] = Field(default=None, max_length=32)
 
 
 class Link(LinkBase, table=True):
@@ -107,6 +130,10 @@ class Link(LinkBase, table=True):
 
 class LinkCreate(LinkBase):
     id: Optional[str] = None
+
+
+class LinkUpdate(SQLModel):
+    role: Optional[str] = None
 
 
 class LinkRead(LinkBase):

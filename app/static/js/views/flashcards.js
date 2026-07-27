@@ -17,7 +17,7 @@ export async function renderFlashcards(root) {
         <option value="figure">Figure</option>
         <option value="place">Place</option>
         <option value="period">Period</option>
-        <option value="milestone">Milestone</option>
+        <option value="milestone">Moment</option>
       </select>
       <input id="fc-tag" class="input sm:w-40" placeholder="Tag filter" />
       <button type="button" id="fc-start" class="btn-primary px-4 py-2">Start review</button>

@@ -44,14 +44,18 @@ _ENTITY_EXTRA_COLUMNS = {
     "attachments": "ALTER TABLE entity ADD COLUMN attachments JSON",
 }
 
+_LINK_EXTRA_COLUMNS = {
+    "role": "ALTER TABLE link ADD COLUMN role VARCHAR(32)",
+}
 
-def _migrate_entity_columns() -> None:
+
+def _migrate_table_columns(table: str, columns: dict[str, str]) -> None:
     with engine.connect() as conn:
-        rows = conn.execute(text("PRAGMA table_info(entity)")).fetchall()
+        rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
         if not rows:
             return
         existing = {row[1] for row in rows}
-        for name, ddl in _ENTITY_EXTRA_COLUMNS.items():
+        for name, ddl in columns.items():
             if name not in existing:
                 conn.execute(text(ddl))
         conn.commit()
@@ -60,7 +64,8 @@ def _migrate_entity_columns() -> None:
 def init_db() -> None:
     """Create tables, migrate columns, and ensure a single Progress row exists."""
     SQLModel.metadata.create_all(engine)
-    _migrate_entity_columns()
+    _migrate_table_columns("entity", _ENTITY_EXTRA_COLUMNS)
+    _migrate_table_columns("link", _LINK_EXTRA_COLUMNS)
     with Session(engine) as session:
         existing = session.get(Progress, 1)
         if existing is None:

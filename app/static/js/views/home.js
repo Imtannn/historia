@@ -1,4 +1,4 @@
-/** Dashboard — streak, XP ring, review CTA, weakest topics. */
+/** Dashboard — activation-first when empty; streak/XP once you have events. */
 
 import { api } from "../api.js";
 import { escapeHtml, formatDate, typeLabel } from "../util.js";
@@ -26,15 +26,36 @@ function goalRing(progress) {
   `;
 }
 
+function bindHomeAdd() {
+  document.getElementById("home-add")?.addEventListener("click", () => {
+    document.getElementById("quick-add-btn")?.click();
+  });
+}
+
 export async function renderHome(root) {
   const data = await api.dashboard();
   const p = data.progress;
   syncProgressChrome(p);
+  const empty = (data.entity_count || 0) === 0 || data.recent.length === 0;
+
+  if (empty && (data.entity_count || 0) === 0) {
+    root.innerHTML = `
+      <div class="min-h-[70vh] flex flex-col items-center justify-center text-center px-4">
+        <h1 class="font-display text-4xl sm:text-5xl tracking-tight">Historia</h1>
+        <p class="text-ink-muted mt-3 max-w-md text-lg">Your history notebook. Capture one event to begin.</p>
+        <button type="button" id="home-add" class="btn-primary mt-8 px-6 py-3 text-base">
+          Add your first event
+        </button>
+      </div>
+    `;
+    bindHomeAdd();
+    return;
+  }
 
   root.innerHTML = `
     <div class="mb-8">
-      <h1 class="font-display text-3xl sm:text-4xl tracking-tight">Historia</h1>
-      <p class="text-ink-muted mt-2 max-w-xl">Organize once. Learn every day.</p>
+      <h1 class="font-display text-3xl sm:text-4xl tracking-tight">Progress</h1>
+      <p class="text-ink-muted mt-2 max-w-xl">Streaks, goals, and practice — the timeline is where history forms.</p>
     </div>
 
     <div class="grid lg:grid-cols-3 gap-6 mb-10">
@@ -53,7 +74,7 @@ export async function renderHome(root) {
       <a href="#/flashcards" class="rounded-2xl bg-accent text-white p-6 shadow-soft hover:bg-accent-dark transition-colors no-underline flex flex-col justify-center">
         <p class="text-xs uppercase tracking-wider text-white/70 font-semibold">Learn</p>
         <p class="font-display text-2xl mt-2">Review now</p>
-        <p class="text-sm text-white/80 mt-2">${data.entity_count} entries ready to practice</p>
+        <p class="text-sm text-white/80 mt-2">${data.entity_count} events ready to practice</p>
       </a>
     </div>
 
@@ -61,15 +82,13 @@ export async function renderHome(root) {
       <section>
         <div class="flex items-baseline justify-between mb-3">
           <h2 class="font-display text-xl">Recently added</h2>
-          <a href="#/library" class="text-sm text-accent hover:underline">Library</a>
+          <a href="#/library" class="text-sm text-accent hover:underline">Events</a>
         </div>
         ${
           data.recent.length === 0
-            ? `<div class="rounded-2xl border border-dashed border-paper-line p-6 text-sm text-ink-muted text-center">
-                Empty for now.
-                <div class="mt-4 flex flex-wrap justify-center gap-2">
-                  <button type="button" id="home-add" class="btn-primary px-4 py-2">+ Add entry</button>
-                </div>
+            ? `<div class="rounded-2xl border border-dashed border-paper-line p-8 text-center">
+                <p class="text-ink-muted text-sm mb-4">No events yet.</p>
+                <button type="button" id="home-add" class="btn-primary px-4 py-2">Add your first event</button>
               </div>`
             : `<div class="space-y-2">
                 ${data.recent
@@ -96,7 +115,7 @@ export async function renderHome(root) {
         </div>
         ${
           data.weakest.length === 0
-            ? `<p class="text-sm text-ink-muted">Add entries to see mastery here.</p>`
+            ? `<p class="text-sm text-ink-muted">Add events to see mastery here.</p>`
             : `<div class="space-y-2">
                 ${data.weakest
                   .map((w) => {
@@ -121,10 +140,5 @@ export async function renderHome(root) {
     </div>
   `;
 
-  const addBtn = document.getElementById("home-add");
-  if (addBtn) {
-    addBtn.addEventListener("click", () => {
-      document.getElementById("quick-add-btn")?.click();
-    });
-  }
+  bindHomeAdd();
 }
