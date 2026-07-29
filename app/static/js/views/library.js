@@ -553,7 +553,7 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
       <div class="flex items-start justify-between mb-4">
         <div>
           <h2 class="font-display text-xl">Add period</h2>
-          <p class="text-sm text-ink-muted mt-0.5">Name it and set a From – To range. Catalog names fill years for you.</p>
+          <p class="text-sm text-ink-muted mt-0.5">Name it and set a From – To range.</p>
         </div>
         <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
       </div>
@@ -561,7 +561,6 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
         <div>
           <label class="label" for="add-period-name">Name</label>
           <input id="add-period-name" class="input text-lg" required maxlength="500" placeholder="e.g. Napoleonic Era" autofocus autocomplete="off" />
-          <div id="add-period-suggest" class="mt-2 max-h-48 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30 hidden"></div>
         </div>
         <div>
           <label class="label" for="add-period-summary">Summary <span class="font-normal text-ink-faint">(optional)</span></label>
@@ -593,74 +592,9 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
     `;
     modal.classList.remove("hidden");
 
-    let catalogPeriods = [];
-    api
-      .catalog()
-      .then((c) => {
-        catalogPeriods = c.periods || [];
-        renderSuggest();
-      })
-      .catch(() => {});
-
     const nameEl = document.getElementById("add-period-name");
-    const suggestEl = document.getElementById("add-period-suggest");
     const fromEl = document.getElementById("add-period-from");
     const toEl = document.getElementById("add-period-to");
-
-    function setEra(name, era) {
-      const el = document.querySelector(`input[name="${name}"][value="${era}"]`);
-      if (el) el.checked = true;
-    }
-
-    function applyCatalogPeriod(p) {
-      nameEl.value = p.name;
-      if (p.start_year != null) {
-        fromEl.value = String(Math.abs(p.start_year));
-        setEra("add-period-from-era", p.start_year < 0 ? "bc" : "ac");
-      }
-      if (p.end_year != null) {
-        toEl.value = String(Math.abs(p.end_year));
-        setEra("add-period-to-era", p.end_year < 0 ? "bc" : "ac");
-      }
-      suggestEl.classList.add("hidden");
-      nameEl.focus();
-    }
-
-    function renderSuggest() {
-      const q = (nameEl?.value || "").trim().toLowerCase();
-      if (!q || q.length < 1) {
-        suggestEl.classList.add("hidden");
-        suggestEl.innerHTML = "";
-        return;
-      }
-      const hits = catalogPeriods.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 10);
-      if (!hits.length) {
-        suggestEl.classList.add("hidden");
-        suggestEl.innerHTML = "";
-        return;
-      }
-      suggestEl.classList.remove("hidden");
-      suggestEl.innerHTML =
-        `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Catalog shortcut</p>` +
-        hits
-          .map(
-            (p) => `
-        <button type="button" data-suggest-name="${escapeHtml(p.name)}"
-          class="w-full text-left px-2 py-1.5 text-sm hover:bg-paper-deep rounded-lg">
-          <span class="block">${escapeHtml(p.name)}</span>
-          <span class="block text-[11px] text-ink-faint">${escapeHtml(formatSignedYear(p.start_year))} – ${escapeHtml(formatSignedYear(p.end_year))}</span>
-        </button>`
-          )
-          .join("");
-      suggestEl.querySelectorAll("[data-suggest-name]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const hit = catalogPeriods.find((p) => p.name === btn.dataset.suggestName);
-          if (hit) applyCatalogPeriod(hit);
-        });
-      });
-    }
-
-    nameEl?.addEventListener("input", renderSuggest);
 
     document.getElementById("add-period-form")?.addEventListener("submit", async (ev) => {
       ev.preventDefault();

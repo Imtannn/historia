@@ -1,4 +1,4 @@
-"""Catalog API — selectable countries, periods, figures."""
+"""Catalog API — selectable countries, empires, figures."""
 
 from __future__ import annotations
 

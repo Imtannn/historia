@@ -331,7 +331,46 @@ details#qa-more > summary::-webkit-details-marker {
   box-shadow: 0 1px 3px rgba(28, 25, 23, 0.08);
 }
 .wt-select { width: 11rem; }
+.wt-scope-select { width: min(22rem, 100%); max-width: 28rem; flex: 1 1 14rem; }
 .wt-tag { width: 10rem; }
+.wt-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.wt-orient-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0.2rem;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--wt-line);
+  gap: 0.15rem;
+}
+.wt-orient-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--wt-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  min-width: 2rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.55rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.wt-orient-btn:hover {
+  color: var(--wt-ink);
+  background: rgba(255, 255, 255, 0.85);
+}
+.wt-orient-btn.is-active {
+  color: var(--wt-ink);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(28, 25, 23, 0.08);
+}
 
 .wt-zoom-bar {
   display: inline-flex;
@@ -384,27 +423,6 @@ details#qa-more > summary::-webkit-details-marker {
   text-align: center;
   padding: 0 0.35rem;
   white-space: nowrap;
-}
-.wt-period-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  flex: 1;
-  min-width: 12rem;
-}
-.wt-period-chip {
-  font-size: 0.75rem;
-  padding: 0.35rem 0.7rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--chip) 35%, #E7E0D6);
-  background: color-mix(in srgb, var(--chip) 12%, #fff);
-  color: var(--wt-ink);
-  cursor: pointer;
-  transition: transform 0.15s, border-color 0.15s;
-}
-.wt-period-chip:hover {
-  transform: translateY(-1px);
-  border-color: var(--chip);
 }
 
 .wt-empty {
@@ -511,18 +529,22 @@ details#qa-more > summary::-webkit-details-marker {
 .wt-stage.is-quiet .wt-axis-line {
   transform: scaleY(1);
 }
+.wt-stage.is-horizontal.is-quiet .wt-axis-line,
+.wt-stage.is-horizontal.is-quiet .wt-axis-seg {
+  transform: scaleX(1);
+}
 
-.wt-event.has-period-color .wt-event-node {
+.wt-event.has-phase-color .wt-event-node {
   background: var(--node);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--node) 45%, transparent),
     0 6px 16px color-mix(in srgb, var(--node) 22%, transparent);
 }
-.wt-event.has-period-color .wt-event-year {
+.wt-event.has-phase-color .wt-event-year {
   color: var(--node);
   border-color: color-mix(in srgb, var(--node) 40%, var(--wt-line));
   background: color-mix(in srgb, #FAF7F2 86%, var(--node) 14%);
 }
-.wt-event.has-period-color .wt-event-card {
+.wt-event.has-phase-color .wt-event-card {
   border-color: color-mix(in srgb, var(--node) 42%, var(--wt-line));
   background: linear-gradient(
     180deg,
@@ -530,11 +552,11 @@ details#qa-more > summary::-webkit-details-marker {
     color-mix(in srgb, var(--node) 9%, #fff) 100%
   );
 }
-.wt-event.has-period-color .wt-event-range-foot {
+.wt-event.has-phase-color .wt-event-range-foot {
   border-top-color: color-mix(in srgb, var(--node) 40%, var(--wt-line));
   color: var(--node);
 }
-.wt-event.has-period-color .wt-event-rail {
+.wt-event.has-phase-color .wt-event-rail {
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--node) 88%, transparent),
@@ -542,11 +564,11 @@ details#qa-more > summary::-webkit-details-marker {
   );
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--node) 18%, transparent);
 }
-.wt-event.has-period-color.is-mmap-root .wt-event-card {
+.wt-event.has-phase-color.is-mmap-root .wt-event-card {
   border-color: color-mix(in srgb, var(--node) 55%, var(--wt-line));
 }
-.wt-event.has-period-color.is-expanded .wt-event-card,
-.wt-event.has-period-color .wt-event-card.is-open {
+.wt-event.has-phase-color.is-expanded .wt-event-card,
+.wt-event.has-phase-color .wt-event-card.is-open {
   border-color: var(--node);
 }
 
@@ -556,14 +578,14 @@ details#qa-more > summary::-webkit-details-marker {
   display: none !important;
 }
 
-/* Vertical axis — dead center, period-colored segments */
+/* Vertical axis — dead center, phase-colored segments */
 .wt-axis {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 50%;
   width: 0;
-  z-index: 2;
+  z-index: 5;
 }
 .wt-axis-line {
   position: absolute;
@@ -588,17 +610,107 @@ details#qa-more > summary::-webkit-details-marker {
   background: var(--seg);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--seg) 22%, transparent);
   z-index: 1;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: help;
   opacity: 0;
   transform: scaleY(0);
   transform-origin: top center;
   animation: wt-draw-axis 1.1s cubic-bezier(0.22, 1, 0.36, 1) 0.2s forwards;
+}
+/* Wider invisible hit target so the thin spine is easy to hover */
+.wt-axis-seg::before {
+  content: "";
+  position: absolute;
+  inset: 0 -14px;
+  border-radius: 999px;
+}
+.wt-axis-seg:hover {
+  z-index: 6;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--seg) 40%, transparent),
+    0 0 0 8px color-mix(in srgb, var(--seg) 16%, transparent);
+}
+.wt-axis-seg::after {
+  content: attr(data-phase-tip);
+  position: absolute;
+  left: 1.1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--wt-ink, #1C1917);
+  background: #fff;
+  border: 1px solid color-mix(in srgb, var(--seg) 45%, var(--wt-line, #E7E5E4));
+  box-shadow: 0 8px 22px rgba(28, 25, 23, 0.12);
+  padding: 0.35rem 0.55rem;
+  border-radius: 0.4rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 7;
+}
+.wt-axis-seg:hover::after {
+  opacity: 1;
 }
 .wt-stage.is-quiet .wt-axis-seg {
   animation: none !important;
   opacity: 1;
   transform: scaleY(1);
 }
+
+/* Period era breakpoints — full-bleed dashed rules across the stage */
+.wt-period-breaks {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
+}
+.wt-period-break {
+  position: absolute;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+.wt-period-break-mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 0;
+  border-top: 1.5px dashed color-mix(in srgb, var(--wt-ink, #1C1917) 42%, #A8A29E);
+  margin: 0;
+}
+.wt-period-break-label {
+  position: relative;
+  z-index: 1;
+  margin-right: 0.85rem;
+  font-size: 0.65rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--wt-muted, #78716C);
+  white-space: nowrap;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: color-mix(in srgb, #FAF7F2 94%, transparent);
+  padding: 0.12rem 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px dashed color-mix(in srgb, var(--wt-ink, #1C1917) 18%, var(--wt-line, #E7E5E4));
+}
+.wt-stage.is-quiet .wt-period-break-mark,
+.wt-stage.is-quiet .wt-period-break-label {
+  animation: none;
+}
+
 .wt-tick {
   position: absolute;
   left: 0;
@@ -615,7 +727,7 @@ details#qa-more > summary::-webkit-details-marker {
   background: #A8A29E;
   flex-shrink: 0;
 }
-.wt-tick.has-period .wt-tick-mark {
+.wt-tick.has-phase .wt-tick-mark {
   background: var(--tick);
   width: 14px;
   height: 2px;
@@ -637,7 +749,7 @@ details#qa-more > summary::-webkit-details-marker {
   z-index: 2;
   box-shadow: 0 1px 4px rgba(28, 25, 23, 0.05);
 }
-.wt-tick.has-period .wt-tick-label {
+.wt-tick.has-phase .wt-tick-label {
   color: var(--tick);
   border-color: color-mix(in srgb, var(--tick) 40%, var(--wt-line, #E7E5E4));
   background: color-mix(in srgb, #FAF7F2 88%, var(--tick) 12%);
@@ -648,6 +760,7 @@ details#qa-more > summary::-webkit-details-marker {
   position: absolute;
   inset: 0;
   z-index: 3;
+  pointer-events: none;
 }
 .wt-event {
   position: absolute;
@@ -663,6 +776,7 @@ details#qa-more > summary::-webkit-details-marker {
   gap: 0.65rem;
   width: calc(50% - 0.85rem);
   max-width: 26rem;
+  pointer-events: auto;
 }
 .wt-event.is-right {
   left: 50%;
@@ -1013,7 +1127,186 @@ button.wt-event-card {
   border-color: var(--wt-accent);
 }
 
-/* Mindmap layer — Phase on spine, events fan SAME side, past the root card */
+/* ——— Horizontal orientation (time left → right) ——— */
+.wt-stage-host.is-horizontal-host {
+  max-height: min(78vh, calc(100vh - 12rem));
+}
+.wt-stage.is-horizontal {
+  min-width: 0;
+  width: auto;
+  min-height: 28rem;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.35) 0%, rgba(250,247,242,0.55) 50%, rgba(255,255,255,0.35) 100%);
+}
+.wt-stage.is-horizontal.has-mmap {
+  min-width: 0;
+  min-height: 36rem;
+}
+.wt-stage.is-horizontal .wt-axis {
+  top: 50%;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 0;
+}
+.wt-stage.is-horizontal .wt-axis-line {
+  top: 0;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 3px;
+  margin-left: 0;
+  margin-top: -1.5px;
+  background: linear-gradient(90deg, transparent 0%, #D6D3D1 2%, #D6D3D1 98%, transparent 100%);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.wt-stage.is-horizontal .wt-axis-seg {
+  top: 0;
+  left: auto;
+  height: 5px;
+  width: auto;
+  margin-left: 0;
+  margin-top: -2.5px;
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.wt-stage.is-horizontal .wt-axis-seg::before {
+  inset: -14px 0;
+}
+.wt-stage.is-horizontal .wt-axis-seg::after {
+  left: 50%;
+  top: auto;
+  bottom: calc(100% + 0.55rem);
+  transform: translateX(-50%);
+}
+.wt-stage.is-horizontal .wt-period-break {
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: auto;
+  transform: translateX(-50%);
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+}
+.wt-stage.is-horizontal .wt-period-break-mark {
+  left: 50%;
+  right: auto;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  height: auto;
+  border-top: 0;
+  border-left: 1.5px dashed color-mix(in srgb, var(--wt-ink, #1C1917) 42%, #A8A29E);
+  transform: translateX(-50%);
+}
+.wt-stage.is-horizontal .wt-period-break-label {
+  margin-right: 0;
+  margin-top: 0.65rem;
+  max-width: 9rem;
+  text-align: center;
+}
+.wt-stage.is-horizontal .wt-tick {
+  top: 0;
+  transform: translate(-50%, -50%);
+  flex-direction: column;
+}
+.wt-stage.is-horizontal .wt-tick-mark {
+  width: 1px;
+  height: 12px;
+}
+.wt-stage.is-horizontal .wt-tick.has-phase .wt-tick-mark {
+  width: 2px;
+  height: 14px;
+}
+.wt-stage.is-horizontal .wt-tick-label {
+  right: auto;
+  left: 50%;
+  top: 0.85rem;
+  transform: translateX(-50%);
+}
+.wt-stage.is-horizontal .wt-event {
+  transform: translateX(-50%);
+  flex-direction: column;
+  width: auto;
+  max-width: 14rem;
+  gap: 0.45rem;
+}
+.wt-stage.is-horizontal .wt-event.is-below {
+  right: auto;
+  flex-direction: column;
+  padding-top: 0;
+  margin-top: 0;
+}
+.wt-stage.is-horizontal .wt-event.is-above {
+  right: auto;
+  flex-direction: column-reverse;
+  padding-bottom: 0;
+  margin-bottom: 0;
+  transform: translateX(-50%);
+}
+.wt-stage.is-horizontal .wt-event-node {
+  margin-left: 0;
+  margin-right: 0;
+  margin-top: -7px;
+  margin-bottom: 0;
+}
+.wt-stage.is-horizontal .wt-event.is-above .wt-event-node {
+  margin-top: 0;
+  margin-bottom: -7px;
+}
+.wt-stage.is-horizontal .wt-event.is-range {
+  transform: none;
+  align-items: stretch;
+  max-width: none;
+  min-height: 0;
+  min-width: 5.75rem;
+}
+.wt-stage.is-horizontal .wt-event.is-range.is-below {
+  margin-top: calc(var(--stack-n, 0) * var(--stack-lane, 1.25rem));
+  top: 50%;
+}
+.wt-stage.is-horizontal .wt-event.is-range.is-above {
+  margin-bottom: calc(var(--stack-n, 0) * var(--stack-lane, 1.25rem));
+  bottom: 50%;
+}
+.wt-stage.is-horizontal .wt-event-rail {
+  top: -2px;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 4px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--node, #3D5A6C) 85%, transparent),
+    color-mix(in srgb, var(--node, #3D5A6C) 35%, transparent)
+  );
+}
+.wt-stage.is-horizontal .wt-event.is-below .wt-event-rail {
+  top: -2px;
+}
+.wt-stage.is-horizontal .wt-event.is-above .wt-event-rail {
+  top: auto;
+  bottom: -2px;
+}
+.wt-stage.is-horizontal .wt-event-range-arrow {
+  transform: rotate(-90deg);
+  display: inline-block;
+}
+.wt-stage.is-horizontal .wt-mmap {
+  transform: none;
+}
+.wt-stage.is-horizontal .wt-mmap.is-fan-above,
+.wt-stage.is-horizontal .wt-mmap.is-fan-below {
+  left: auto;
+  right: auto;
+}
+
+/* Mindmap layer — Event on spine, moments fan SAME side, past the root card */
 .wt-mmap-links {
   position: absolute;
   inset: 0;
@@ -1217,8 +1510,8 @@ button.wt-mmap-card.is-event {
   box-shadow: 0 12px 28px rgba(28, 25, 23, 0.12);
   transform: translateX(-3px);
 }
-.wt-event.has-period-color.is-right:hover .wt-event-card,
-.wt-event.has-period-color.is-left:hover .wt-event-card {
+.wt-event.has-phase-color.is-right:hover .wt-event-card,
+.wt-event.has-phase-color.is-left:hover .wt-event-card {
   border-color: var(--node);
 }
 .wt-event-date {

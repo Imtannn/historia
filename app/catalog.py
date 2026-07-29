@@ -1,4 +1,4 @@
-"""Built-in selectable catalogs for countries, periods, and figures."""
+"""Built-in selectable catalogs for countries and figures."""
 
 from __future__ import annotations
 
@@ -296,51 +296,6 @@ EMPIRES: list[tuple[str, str, list[str]]] = [
     ("Umayyad Caliphate", "🏛️", ["Syria", "Spain", "Egypt"]),
 ]
 
-# Broad historical periods: (name, start_year, end_year)
-# Years are signed integers: negative = BC, positive = AC/CE.
-PERIODS: list[tuple[str, int, int]] = [
-    ("Prehistory", -300000, -3000),
-    ("Ancient Near East", -3500, -539),
-    ("Ancient Egypt", -3100, -30),
-    ("Classical Greece", -800, -146),
-    ("Roman Republic", -509, -27),
-    ("Roman Empire", -27, 476),
-    ("Late Antiquity", 250, 750),
-    ("Early Middle Ages", 500, 1000),
-    ("High Middle Ages", 1000, 1300),
-    ("Late Middle Ages", 1300, 1500),
-    ("Renaissance", 1400, 1600),
-    ("Age of Exploration", 1415, 1600),
-    ("Reformation", 1517, 1648),
-    ("Early Modern Period", 1500, 1800),
-    ("Scientific Revolution", 1543, 1687),
-    ("Age of Enlightenment", 1685, 1815),
-    ("American Revolution", 1765, 1783),
-    ("French Revolution", 1789, 1799),
-    ("Napoleonic Era", 1799, 1815),
-    ("Industrial Revolution", 1760, 1840),
-    ("Victorian Era", 1837, 1901),
-    ("German Unification", 1864, 1871),
-    ("Meiji Period", 1868, 1912),
-    ("Belle Époque", 1871, 1914),
-    ("World War I", 1914, 1918),
-    ("Interwar Period", 1918, 1939),
-    ("World War II", 1939, 1945),
-    ("Cold War", 1947, 1991),
-    ("Decolonization", 1945, 1975),
-    ("Post–Cold War", 1991, 2010),
-    ("Contemporary History", 1991, 2100),
-    ("Islamic Golden Age", 750, 1258),
-    ("Tang Dynasty", 618, 907),
-    ("Ming Dynasty", 1368, 1644),
-    ("Qing Dynasty", 1644, 1912),
-    ("Mughal Empire", 1526, 1857),
-    ("Age of Absolutism", 1648, 1789),
-    ("Baroque Period", 1600, 1750),
-    ("Romantic Era", 1800, 1850),
-    ("Modern Europe", 1789, 2100),
-]
-
 # Well-known figures / characters for history study
 FIGURES: list[str] = [
     "Alexander the Great",
@@ -436,8 +391,5 @@ def catalog_payload() -> dict:
     return {
         "countries": [{"name": n, "flag": f} for n, f in COUNTRIES],
         "empires": empires,
-        "periods": [
-            {"name": n, "start_year": start, "end_year": end} for n, start, end in PERIODS
-        ],
         "figures": [{"name": n} for n in FIGURES],
     }

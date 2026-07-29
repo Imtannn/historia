@@ -7,7 +7,6 @@ import {
   formatRange,
   formatSignedYear,
   normalizeTag,
-  signedYearToStored,
   splitDateParts,
   storedToSignedYear,
   toast,
@@ -15,7 +14,7 @@ import {
 
 let allEvents = [];
 let hubs = { period: [], phase: [], country: [], figure: [] };
-let catalog = { countries: [], empires: [], periods: [], figures: [] };
+let catalog = { countries: [], empires: [], figures: [] };
 let selectedRelated = new Map();
 let selectedBelong = {
   period: new Map(),
@@ -100,13 +99,6 @@ function hasPlaceContext() {
   return selectedPlaces().length > 0;
 }
 
-function catalogPeriodByName(name) {
-  return (
-    (catalog.periods || []).find((p) => p.name.toLowerCase() === String(name || "").toLowerCase()) ||
-    null
-  );
-}
-
 /** Period overlaps the selected era (BC years are negative). Custom periods without range always match. */
 function periodMatchesEra(periodMeta, era) {
   if (!periodMeta || periodMeta.start_year == null || periodMeta.end_year == null) return true;
@@ -147,68 +139,80 @@ function defaultCreateYearsFromEvent() {
   };
 }
 
-/** Prefer the period entity's from/to; fall back to catalog years by name. */
+/** Prefer the period/phase entity's from/to years. */
 function periodMetaFor(periodOrName) {
   if (periodOrName && typeof periodOrName === "object") {
     const start = storedToSignedYear(periodOrName.date_start);
     const end = storedToSignedYear(periodOrName.date_end);
     if (start != null || end != null) {
+      const a = start ?? end;
+      const b = end ?? start;
       return {
         name: periodOrName.title,
-        start_year: start ?? end,
-        end_year: end ?? start,
+        start_year: Math.min(a, b),
+        end_year: Math.max(a, b),
       };
     }
-    return catalogPeriodByName(periodOrName.title);
+    return null;
   }
-  return catalogPeriodByName(periodOrName);
+  return null;
+}
+
+/** Normalize a From–To pair on the signed timeline (−BC … 0 … +AC). */
+function normalizeYearRange(start, end = start) {
+  if (start == null) return null;
+  const hi = end == null ? start : end;
+  return start <= hi ? { lo: start, hi } : { lo: hi, hi: start };
 }
 
 function periodOverlapsRange(meta, start, end) {
   if (!meta || meta.start_year == null || meta.end_year == null) return false;
-  if (start == null) return false;
-  const lo = start;
-  const hi = end == null ? start : end;
-  // Inclusive overlap: event touches the period at any point
-  return lo <= meta.end_year && hi >= meta.start_year;
+  const r = normalizeYearRange(start, end);
+  if (!r) return false;
+  const plo = Math.min(meta.start_year, meta.end_year);
+  const phi = Math.max(meta.start_year, meta.end_year);
+  // Inclusive overlap on the signed year line (BC negative, AC positive)
+  return r.lo <= phi && r.hi >= plo;
 }
 
-/** Notebook periods (yours) that overlap [start, end]. */
+/**
+ * Score notebook eras against a date span on the signed year line (−BC … +AC).
+ * A span that crosses period boundaries matches every overlapping era
+ * (so a phase/event can belong to more than one period).
+ */
+function scoreNotebookEras(hubList, start, end = start) {
+  const r = normalizeYearRange(start, end);
+  if (!r) return [];
+  const out = [];
+  for (const ent of hubList || []) {
+    const meta = periodMetaFor(ent);
+    if (!periodOverlapsRange(meta, r.lo, r.hi)) continue;
+    const plo = Math.min(meta.start_year, meta.end_year);
+    const phi = Math.max(meta.start_year, meta.end_year);
+    out.push({
+      entity: ent,
+      meta: { ...meta, start_year: plo, end_year: phi },
+      span: phi - plo,
+      overlap: Math.min(r.hi, phi) - Math.max(r.lo, plo),
+    });
+  }
+  out.sort(
+    (a, b) =>
+      b.overlap - a.overlap ||
+      a.span - b.span ||
+      a.entity.title.localeCompare(b.entity.title)
+  );
+  return out;
+}
+
+/** Notebook periods that best match [start, end] on the signed timeline. */
 function findNotebookPeriodsContaining(start, end = start) {
-  if (start == null) return [];
-  const hi = end == null ? start : end;
-  const lo = start;
-  const out = [];
-  for (const p of hubs.period) {
-    const meta = periodMetaFor(p);
-    if (!periodOverlapsRange(meta, lo, hi)) continue;
-    out.push({
-      entity: p,
-      meta,
-      span: meta.end_year - meta.start_year,
-    });
-  }
-  out.sort((a, b) => a.span - b.span || a.entity.title.localeCompare(b.entity.title));
-  return out;
+  return scoreNotebookEras(hubs.period || [], start, end);
 }
 
-/** Notebook phases that overlap [start, end]. */
+/** Notebook phases that best match [start, end]. */
 function findNotebookPhasesContaining(start, end = start) {
-  if (start == null) return [];
-  const hi = end == null ? start : end;
-  const lo = start;
-  const out = [];
-  for (const p of hubs.phase || []) {
-    const meta = periodMetaFor(p);
-    if (!periodOverlapsRange(meta, lo, hi)) continue;
-    out.push({
-      entity: p,
-      meta,
-      span: meta.end_year - meta.start_year,
-    });
-  }
-  out.sort((a, b) => a.span - b.span || a.entity.title.localeCompare(b.entity.title));
-  return out;
+  return scoreNotebookEras(hubs.phase || [], start, end);
 }
 
 function collectPinned(kind) {
@@ -658,21 +662,13 @@ function renderPeriodCatalog() {
     .filter((p) => periodMatchesEra(periodMetaFor(p) || { start_year: null, end_year: null }, era))
     .slice()
     .sort((a, b) => a.title.localeCompare(b.title));
-  const mineNames = new Set(hubs.period.map((p) => p.title.toLowerCase()));
-  const catalogHits = (catalog.periods || [])
-    .filter((p) => !mineNames.has(p.name.toLowerCase()))
-    .filter((p) => !selectedNames.has(p.name.toLowerCase()))
-    .filter((p) => periodMatchesEra(p, era))
-    .filter((p) => matchesQ(p.name, q));
 
   const exactHit =
-    mine.some((p) => p.title.toLowerCase() === q) ||
-    catalogHits.some((p) => p.name.toLowerCase() === q) ||
-    selectedNames.has(q);
+    mine.some((p) => p.title.toLowerCase() === q) || selectedNames.has(q);
   const canCreate = q.length >= 2 && !exactHit;
   const defs = defaultCreateYearsFromEvent();
 
-  if (!mine.length && !catalogHits.length && !canCreate) {
+  if (!mine.length && !canCreate) {
     box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">${
       q
         ? "No matches — keep typing to create a new period."
@@ -706,27 +702,6 @@ function renderPeriodCatalog() {
   } else if (!q) {
     html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your periods</p>`;
     html += `<p class="text-xs text-ink-faint px-2 py-1.5">None yet — search a name to add one.</p>`;
-  }
-
-  if (catalogHits.length) {
-    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 ${mine.length || !q ? "pt-2 border-t border-paper-line mt-1" : "pt-1.5"} pb-0.5">Add from catalog</p>`;
-    html += catalogHits
-      .map((p) => {
-        const range =
-          p.start_year != null
-            ? `${formatSignedYear(p.start_year)} – ${formatSignedYear(p.end_year)}`
-            : "";
-        return `
-    <button type="button" data-pick-kind="period" data-pick-name="${escapeHtml(p.name)}" data-pick-flag=""
-      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex items-center justify-between gap-2">
-      <span class="min-w-0">
-        <span class="block">${escapeHtml(p.name)}</span>
-        ${range ? `<span class="block text-[11px] text-ink-faint">${escapeHtml(range)}</span>` : ""}
-      </span>
-      <span class="text-[11px] text-accent-dark shrink-0">Add</span>
-    </button>`;
-      })
-      .join("");
   }
 
   if (canCreate) {
@@ -1138,45 +1113,23 @@ function refreshBelongUI() {
 }
 
 async function setPrimaryPeriod(name) {
-  const meta = catalogPeriodByName(name);
-  if (meta && !periodMatchesEra(meta, selectedEra())) {
-    toast(
-      selectedEra() === "bc"
-        ? "That period is AC-only — switch to AC, or pick a BC period"
-        : "That period is BC-only — switch to BC, or pick an AC period"
-    );
-    return;
-  }
   await ensurePeriod(name);
   refreshBelongUI();
 }
 
-/** Create or reuse a period, copying catalog from/to when available. */
+/** Create or reuse a notebook period (dates from the create form when provided). */
 async function ensurePeriod(name, { date_start = undefined, date_end = undefined } = {}) {
   const existing = hubs.period.find((e) => e.title.toLowerCase() === name.toLowerCase());
   if (existing) {
-    if (!existing.date_start && !existing.date_end) {
-      const meta = catalogPeriodByName(name);
-      if (meta && meta.start_year != null && meta.end_year != null) {
-        try {
-          const updated = await api.updateEntity(existing.id, {
-            date_start: signedYearToStored(meta.start_year),
-            date_end: signedYearToStored(meta.end_year),
-          });
-          Object.assign(existing, updated);
-        } catch {
-          /* keep selecting even if backfill fails */
-        }
-      } else if (date_start != null || date_end != null) {
-        try {
-          const updated = await api.updateEntity(existing.id, {
-            date_start: date_start ?? null,
-            date_end: date_end ?? null,
-          });
-          Object.assign(existing, updated);
-        } catch {
-          /* ignore */
-        }
+    if ((!existing.date_start && !existing.date_end) && (date_start != null || date_end != null)) {
+      try {
+        const updated = await api.updateEntity(existing.id, {
+          date_start: date_start ?? null,
+          date_end: date_end ?? null,
+        });
+        Object.assign(existing, updated);
+      } catch {
+        /* keep selecting even if backfill fails */
       }
     }
     selectedBelong.period.set(existing.id, existing);
@@ -1184,18 +1137,8 @@ async function ensurePeriod(name, { date_start = undefined, date_end = undefined
     return existing;
   }
 
-  let start = date_start;
-  let end = date_end;
-  if (start === undefined && end === undefined) {
-    const meta = catalogPeriodByName(name);
-    if (meta && meta.start_year != null && meta.end_year != null) {
-      start = signedYearToStored(meta.start_year);
-      end = signedYearToStored(meta.end_year);
-    } else {
-      start = null;
-      end = null;
-    }
-  }
+  const start = date_start === undefined ? null : date_start;
+  const end = date_end === undefined ? null : date_end;
 
   const created = await api.createEntity({
     type: "period",
@@ -1511,7 +1454,7 @@ export async function openQuickAdd({
   let phases;
   let places;
   let figures;
-  let catalogData = { countries: [], empires: [], periods: [], figures: [] };
+  let catalogData = { countries: [], empires: [], figures: [] };
   try {
     [events, periods, phases, places, figures, catalogData] = await Promise.all([
       api.listEntities({ type: "event" }),
@@ -1519,7 +1462,7 @@ export async function openQuickAdd({
       api.listEntities({ type: "phase" }),
       api.listEntities({ type: "place" }),
       api.listEntities({ type: "figure" }),
-      api.catalog().catch(() => ({ countries: [], empires: [], periods: [], figures: [] })),
+      api.catalog().catch(() => ({ countries: [], empires: [], figures: [] })),
     ]);
   } catch (err) {
     toast(err.message || "Could not open Add event");
@@ -1530,7 +1473,6 @@ export async function openQuickAdd({
   catalog = {
     countries: catalogData?.countries || [],
     empires: catalogData?.empires || [],
-    periods: catalogData?.periods || [],
     figures: catalogData?.figures || [],
   };
   selectedRelated = new Map();
