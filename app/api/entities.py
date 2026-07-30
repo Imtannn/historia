@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
-from app.dates import date_sort_key
+from app.dates import date_sort_key, parse_historia_date
 from app.db import get_session
 from app.models import (
     Entity,
@@ -32,6 +32,85 @@ def _entity_read(e: Entity) -> EntityRead:
     if data.get("attachments") is None:
         data["attachments"] = []
     return EntityRead.model_validate(data)
+
+
+def _signed_year(value: Optional[str]) -> Optional[int]:
+    parsed = parse_historia_date(value)
+    return parsed[0] if parsed else None
+
+
+def _year_range(entity: Entity) -> Optional[tuple[int, int]]:
+    y0 = _signed_year(entity.date_start)
+    y1 = _signed_year(entity.date_end)
+    if y0 is None and y1 is None:
+        return None
+    if y0 is None:
+        return (y1, y1)  # type: ignore[return-value]
+    if y1 is None:
+        return (y0, y0)
+    return (min(y0, y1), max(y0, y1))
+
+
+def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] <= b[1] and a[1] >= b[0]
+
+
+def _sync_overlapping_phases_for_period(session: Session, period: Entity) -> None:
+    """
+    Keep phase → period part_of links in sync with date overlap.
+
+    Creating a period after its phases used to leave them unlinked, because
+    auto-map only ran when saving a phase. This backfills (and prunes) links
+    whenever a period is created or its dates change.
+    """
+    if period.type != EntityType.period:
+        return
+    period_range = _year_range(period)
+    if period_range is None:
+        return
+
+    phases = list(session.exec(select(Entity).where(Entity.type == EntityType.phase)).all())
+    overlapping_ids = {
+        phase.id
+        for phase in phases
+        if (pr := _year_range(phase)) is not None and _ranges_overlap(pr, period_range)
+    }
+
+    # Incoming part_of links: phase → this period
+    incoming = session.exec(
+        select(Link).where(
+            Link.target_id == period.id,
+            Link.relation == RelationType.part_of,
+        )
+    ).all()
+    for link in incoming:
+        source = session.get(Entity, link.source_id)
+        if source is None or source.type != EntityType.phase:
+            continue
+        if link.source_id not in overlapping_ids:
+            session.delete(link)
+
+    session.flush()
+
+    existing_sources = {
+        link.source_id
+        for link in session.exec(
+            select(Link).where(
+                Link.target_id == period.id,
+                Link.relation == RelationType.part_of,
+            )
+        ).all()
+    }
+    for phase_id in overlapping_ids:
+        if phase_id in existing_sources:
+            continue
+        session.add(
+            Link(
+                source_id=phase_id,
+                target_id=period.id,
+                relation=RelationType.part_of,
+            )
+        )
 
 
 def _normalize_role(role: str | None) -> str | None:
@@ -186,6 +265,9 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
             )
         )
 
+    if entity.type == EntityType.period:
+        _sync_overlapping_phases_for_period(session, entity)
+
     session.commit()
     session.refresh(entity)
     return _entity_read(entity)
@@ -281,6 +363,9 @@ def update_entity(
                     relation=payload.link_relation,
                 )
             )
+
+    if entity.type == EntityType.period:
+        _sync_overlapping_phases_for_period(session, entity)
 
     session.commit()
     session.refresh(entity)
