@@ -171,8 +171,9 @@ function periodOverlapsRange(meta, start, end) {
   if (!r) return false;
   const plo = Math.min(meta.start_year, meta.end_year);
   const phi = Math.max(meta.start_year, meta.end_year);
-  // Inclusive overlap on the signed year line (BC negative, AC positive)
-  return r.lo <= phi && r.hi >= plo;
+  // Share interior years on the signed timeline; endpoint-only touch does not count
+  // (Prehistory …3300 BC must not claim Bronze Age 3300 BC…).
+  return r.lo < phi && r.hi > plo;
 }
 
 /**

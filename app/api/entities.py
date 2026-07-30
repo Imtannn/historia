@@ -52,7 +52,9 @@ def _year_range(entity: Entity) -> Optional[tuple[int, int]]:
 
 
 def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
-    return a[0] <= b[1] and a[1] >= b[0]
+    """True when ranges share interior years. Endpoint-only touch does not count
+    (so Prehistory …3300 BC does not claim Bronze Age 3300 BC…)."""
+    return a[0] < b[1] and a[1] > b[0]
 
 
 def _sync_overlapping_phases_for_period(session: Session, period: Entity) -> None:
