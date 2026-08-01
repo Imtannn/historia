@@ -107,6 +107,7 @@ class TopicCreate(SQLModel):
     summary: Optional[str] = Field(default=None, max_length=2000)
     event_ids: list[str] = Field(default_factory=list)
     phase_ids: list[str] = Field(default_factory=list)
+    figure_ids: list[str] = Field(default_factory=list)
 
 
 # ---------- Link ----------
@@ -114,13 +115,35 @@ class TopicCreate(SQLModel):
 
 # Optional role on involves (event → figure): born, died, ruled, fought, wrote, met, …
 INVOLVE_ROLES = ("born", "died", "ruled", "fought", "wrote", "met", "other")
+LINK_ROLE_MAX_LENGTH = 64
+ROLE_LINK_RELATIONS = (RelationType.involves, RelationType.related_to)
+
+
+def normalize_link_role(role: str | None, relation: RelationType) -> str | None:
+    """Normalize involves presets or free-text related_to labels. Raises ValueError if invalid."""
+    if role is None:
+        return None
+    text = str(role).strip()
+    if not text:
+        return None
+    if len(text) > LINK_ROLE_MAX_LENGTH:
+        raise ValueError(f"Relationship label is too long (max {LINK_ROLE_MAX_LENGTH} characters)")
+    if relation == RelationType.involves:
+        key = text.lower()
+        if key not in INVOLVE_ROLES:
+            raise ValueError(f"Invalid involve role: {role}")
+        return key
+    if relation == RelationType.related_to:
+        return text
+    raise ValueError("Roles are only for involves or related_to links")
 
 
 class LinkBase(SQLModel):
     source_id: str = Field(foreign_key="entity.id", index=True)
     target_id: str = Field(foreign_key="entity.id", index=True)
     relation: RelationType = RelationType.related_to
-    role: Optional[str] = Field(default=None, max_length=32)
+    # involves: preset roles; related_to (figure↔figure): free-text relationship label
+    role: Optional[str] = Field(default=None, max_length=LINK_ROLE_MAX_LENGTH)
 
 
 class Link(LinkBase, table=True):

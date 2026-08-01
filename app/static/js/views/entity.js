@@ -31,6 +31,10 @@ function groupList(related) {
   ];
 }
 
+function groupTitle(key, overrides = {}) {
+  return overrides[key] || GROUP_TITLES[key] || typeLabel(key);
+}
+
 function lifeTimelineHtml(e, lifeEvents) {
   const rows = [];
 
@@ -291,7 +295,7 @@ function renderEventDetail(root, data, e, bodyHtml) {
               const items = related[key];
               return `
               <section class="mb-8">
-                <h2 class="font-display text-xl mb-3">${GROUP_TITLES[key] || typeLabel(key)}</h2>
+                <h2 class="font-display text-xl mb-3">${groupTitle(key)}</h2>
                 <div class="space-y-2">
                   ${items
                     .map((item) => {
@@ -405,7 +409,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
         ${
           isTopic
             ? `<button type="button" id="topic-add-event" class="btn-primary text-sm px-3 py-1.5">Add event</button>
-               <button type="button" id="topic-add-phase" class="btn-secondary text-sm px-3 py-1.5">Add phase</button>`
+               <button type="button" id="topic-add-phase" class="btn-secondary text-sm px-3 py-1.5">Add phase</button>
+               <button type="button" id="topic-add-figure" class="btn-secondary text-sm px-3 py-1.5">Add figure</button>`
             : ""
         }
         ${
@@ -540,12 +545,15 @@ function renderGenericHub(root, data, e, bodyHtml) {
           ? groups
               .map((key) => {
                 const items = data.related[key];
-                const title =
-                  isTopic && key === "event"
-                    ? "Events in this topic"
-                    : isTopic && key === "phase"
-                      ? "Phases in this topic"
-                      : GROUP_TITLES[key] || typeLabel(key);
+                const title = groupTitle(key, {
+                  ...(isTopic
+                    ? {
+                        event: "Events in this topic",
+                        phase: "Phases in this topic",
+                        figure: "Figures in this topic",
+                      }
+                    : {}),
+                });
                 return `
               <section class="mb-8">
                 <h2 class="font-display text-xl mb-3">${title}</h2>
@@ -572,10 +580,11 @@ function renderGenericHub(root, data, e, bodyHtml) {
               .join("")
           : isTopic
             ? `<section class="mb-8 rounded-2xl border border-dashed border-paper-line p-6 text-sm text-ink-muted space-y-3">
-              <p>No events or phases in this topic yet.</p>
+              <p>No events, phases, or figures in this topic yet.</p>
               <div class="flex flex-wrap gap-2">
                 <button type="button" id="topic-add-event-empty" class="btn-primary text-sm px-3 py-1.5">Add event</button>
                 <button type="button" id="topic-add-phase-empty" class="btn-secondary text-sm px-3 py-1.5">Add phase</button>
+                <button type="button" id="topic-add-figure-empty" class="btn-secondary text-sm px-3 py-1.5">Add figure</button>
               </div>
             </section>`
             : `<section class="mb-8 rounded-2xl border border-dashed border-paper-line p-6 text-sm text-ink-muted">
@@ -590,7 +599,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
               const items = related[key];
               return `
               <section class="mb-8">
-                <h2 class="font-display text-xl mb-3">${GROUP_TITLES[key] || typeLabel(key)}</h2>
+                <h2 class="font-display text-xl mb-3">${groupTitle(key)}</h2>
                 <div class="space-y-2">
                   ${items
                     .map((item) => {
@@ -671,7 +680,7 @@ function renderFigureBiography(root, data, e, bodyHtml) {
           : ""
       }
       <div class="flex flex-wrap gap-2 mt-5">
-        <button type="button" id="figure-edit" class="btn-secondary text-sm px-3 py-1.5">Edit bio</button>
+        <button type="button" id="figure-edit" class="btn-secondary text-sm px-3 py-1.5">Edit</button>
         <button type="button" id="figure-add-moment-top" class="btn-primary text-sm px-3 py-1.5">Add event</button>
         <button type="button" id="entity-delete" class="btn-ghost text-sm text-red-700 hover:bg-red-50">Delete</button>
       </div>
@@ -695,15 +704,23 @@ function renderFigureBiography(root, data, e, bodyHtml) {
               const items = related[key];
               return `
               <section class="mb-8">
-                <h2 class="font-display text-xl mb-3">${GROUP_TITLES[key] || typeLabel(key)}</h2>
+                <h2 class="font-display text-xl mb-3">${groupTitle(key, { figure: "Related people" })}</h2>
                 <div class="space-y-2">
                   ${items
                     .map((item) => {
                       const ent = item.entity;
+                      const role = item.role ? String(item.role) : "";
                       return `
                       <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                         <div class="flex-1 min-w-0">
-                          <span class="font-medium">${escapeHtml(ent.title)}</span>
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-medium">${escapeHtml(ent.title)}</span>
+                            ${
+                              role
+                                ? `<span class="text-[11px] px-2 py-0.5 rounded-full bg-paper-deep text-ink-muted">${escapeHtml(role)}</span>`
+                                : ""
+                            }
+                          </div>
                           ${ent.summary ? `<p class="text-sm text-ink-muted mt-0.5 line-clamp-1">${escapeHtml(ent.summary)}</p>` : ""}
                         </div>
                       </a>`;
@@ -882,10 +899,13 @@ export async function renderEntity(root, { params }) {
     };
     const addEvent = () => openAddToTopic(e, { kind: "event", onSaved: refresh });
     const addPhase = () => openAddToTopic(e, { kind: "phase", onSaved: refresh });
+    const addFigure = () => openAddToTopic(e, { kind: "figure", onSaved: refresh });
     document.getElementById("topic-add-event")?.addEventListener("click", addEvent);
     document.getElementById("topic-add-phase")?.addEventListener("click", addPhase);
+    document.getElementById("topic-add-figure")?.addEventListener("click", addFigure);
     document.getElementById("topic-add-event-empty")?.addEventListener("click", addEvent);
     document.getElementById("topic-add-phase-empty")?.addEventListener("click", addPhase);
+    document.getElementById("topic-add-figure-empty")?.addEventListener("click", addFigure);
   }
 
   if (e.type === "event") {

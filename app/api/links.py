@@ -5,21 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.api.roles import ROLE_LINK_RELATIONS, http_normalize_role
 from app.db import get_session
-from app.models import INVOLVE_ROLES, Entity, Link, LinkCreate, LinkRead, LinkUpdate, RelationType
+from app.models import Entity, Link, LinkCreate, LinkRead, LinkUpdate
 
 router = APIRouter(prefix="/links", tags=["links"])
-
-
-def _normalize_role(role: str | None) -> str | None:
-    if role is None:
-        return None
-    r = str(role).strip().lower()
-    if not r:
-        return None
-    if r not in INVOLVE_ROLES:
-        raise HTTPException(400, f"Invalid involve role: {role}")
-    return r
 
 
 @router.get("", response_model=list[LinkRead])
@@ -43,9 +33,10 @@ def create_link(payload: LinkCreate, session: Session = Depends(get_session)) ->
     if not session.get(Entity, payload.target_id):
         raise HTTPException(404, "Target entity not found")
 
-    role = _normalize_role(payload.role) if payload.relation == RelationType.involves else None
+    role = None
+    if payload.relation in ROLE_LINK_RELATIONS and payload.role:
+        role = http_normalize_role(payload.role, payload.relation)
 
-    # Avoid exact duplicates
     existing = session.exec(
         select(Link).where(
             Link.source_id == payload.source_id,
@@ -85,9 +76,9 @@ def update_link(
     if not link:
         raise HTTPException(404, "Link not found")
     if "role" in payload.model_dump(exclude_unset=True):
-        if link.relation != RelationType.involves and payload.role:
-            raise HTTPException(400, "Roles are only for involves links")
-        link.role = _normalize_role(payload.role)
+        if link.relation not in ROLE_LINK_RELATIONS and payload.role:
+            raise HTTPException(400, "Roles are only for involves or related_to links")
+        link.role = http_normalize_role(payload.role, link.relation)
         session.add(link)
         session.commit()
         session.refresh(link)

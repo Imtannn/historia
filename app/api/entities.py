@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
+from app.api.roles import http_normalize_role
 from app.dates import date_sort_key, parse_historia_date
 from app.db import get_session
 from app.models import (
@@ -15,7 +16,6 @@ from app.models import (
     EntityRead,
     EntityType,
     EntityUpdate,
-    INVOLVE_ROLES,
     Link,
     RelationType,
     ReviewState,
@@ -115,17 +115,6 @@ def _sync_overlapping_phases_for_period(session: Session, period: Entity) -> Non
         )
 
 
-def _normalize_role(role: str | None) -> str | None:
-    if role is None:
-        return None
-    r = str(role).strip().lower()
-    if not r:
-        return None
-    if r not in INVOLVE_ROLES:
-        raise HTTPException(400, f"Invalid involve role: {role}")
-    return r
-
-
 def _add_typed_links(
     session: Session,
     source_id: str,
@@ -146,7 +135,7 @@ def _add_typed_links(
                 400,
                 f"Expected {expected_type.value}, got {target.type.value} ({target.title})",
             )
-        role = _normalize_role(roles.get(tid)) if relation == RelationType.involves else None
+        role = http_normalize_role(roles.get(tid), relation) if tid in roles else None
         existing = session.exec(
             select(Link).where(
                 Link.source_id == source_id,
@@ -155,11 +144,18 @@ def _add_typed_links(
             )
         ).first()
         if existing:
-            if relation == RelationType.involves and tid in roles:
+            if tid in roles:
                 existing.role = role
                 session.add(existing)
             continue
         session.add(Link(source_id=source_id, target_id=tid, relation=relation, role=role))
+
+
+def _country_and_figure_relations(entity_type: EntityType) -> tuple[RelationType, RelationType]:
+    """Figure countries use involves; figure↔figure uses related_to. Events use occurred_in / involves."""
+    if entity_type == EntityType.figure:
+        return RelationType.involves, RelationType.related_to
+    return RelationType.occurred_in, RelationType.involves
 
 
 @router.get("", response_model=list[EntityRead])
@@ -247,11 +243,17 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
     _add_typed_links(
         session, entity.id, payload.phase_ids, EntityType.phase, RelationType.part_of
     )
+    country_rel, figure_rel = _country_and_figure_relations(entity.type)
     _add_typed_links(
-        session, entity.id, payload.country_ids, EntityType.place, RelationType.occurred_in
+        session, entity.id, payload.country_ids, EntityType.place, country_rel
     )
     _add_typed_links(
-        session, entity.id, payload.figure_ids, EntityType.figure, RelationType.involves, payload.figure_roles
+        session,
+        entity.id,
+        payload.figure_ids,
+        EntityType.figure,
+        figure_rel,
+        payload.figure_roles,
     )
 
     for target_id in payload.link_ids:
@@ -341,6 +343,22 @@ def update_entity(
                     (RelationType.part_of, payload.period_ids, EntityType.period, None),
                 ],
             )
+        elif entity.type == EntityType.figure:
+            country_rel, figure_rel = _country_and_figure_relations(EntityType.figure)
+            specs: list[tuple[RelationType, list[str], EntityType, dict[str, str] | None]] = []
+            if payload.country_ids is not None:
+                specs.append((country_rel, payload.country_ids, EntityType.place, None))
+            if payload.figure_ids is not None:
+                specs.append(
+                    (
+                        figure_rel,
+                        payload.figure_ids,
+                        EntityType.figure,
+                        payload.figure_roles if payload.figure_roles is not None else {},
+                    )
+                )
+            if specs:
+                _replace_links_of_relations(session, entity_id, specs)
 
     if payload.link_ids is not None:
         # Replace related_to outgoing links

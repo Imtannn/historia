@@ -107,15 +107,22 @@ export function formatDate(value) {
   if (!value || !String(value).trim()) return "";
   const p = parseDate(value);
   if (!p) return "";
-  const absYear = Math.abs(p.year);
+  const yearLabel = formatYearNumber(Math.abs(p.year));
   const era = p.year < 0 ? "BC" : "AC";
   const body = String(value).replace(/^-/, "");
   const parts = body.split("-");
   const hasMonth = parts.length >= 2 && /^\d+$/.test(parts[1]);
   const hasDay = parts.length >= 3 && /^\d+$/.test(parts[2]);
-  if (hasDay && hasMonth) return `${parseInt(parts[2], 10)}/${parseInt(parts[1], 10)}/${absYear} ${era}`;
-  if (hasMonth) return `${parseInt(parts[1], 10)}/${absYear} ${era}`;
+  if (hasDay && hasMonth) return `${parseInt(parts[2], 10)}/${parseInt(parts[1], 10)}/${yearLabel} ${era}`;
+  if (hasMonth) return `${parseInt(parts[1], 10)}/${yearLabel} ${era}`;
   return formatSignedYear(p.year);
+}
+
+/** Absolute year with thousands separators (e.g. 3300 → "3,300"). */
+export function formatYearNumber(year) {
+  const n = Math.round(Math.abs(Number(year)));
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString("en-US");
 }
 
 /** Display a signed historic year (negative = BC). */
@@ -123,7 +130,8 @@ export function formatSignedYear(year) {
   if (year == null || year === "") return "";
   const n = Math.round(Number(year));
   if (!Number.isFinite(n)) return "";
-  return n < 0 ? `${Math.abs(n)} BC` : `${n} AC`;
+  const label = formatYearNumber(n);
+  return n < 0 ? `${label} BC` : `${label} AC`;
 }
 
 export function formatRange(start, end) {

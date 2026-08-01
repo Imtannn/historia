@@ -449,6 +449,103 @@ function chipHtml(label, attrs) {
     </button>`;
 }
 
+const LINK_ROLE_MAX_LENGTH = 64;
+const PICKER_HIT_LIMIT = 30;
+
+function sortByTitle(entities) {
+  return entities.slice().sort((a, b) => a.title.localeCompare(b.title));
+}
+
+function neighborRelation(item) {
+  return String(item?.relation || "");
+}
+
+function neighborItems(neighbors, type, { direction = null, relation = null } = {}) {
+  return (neighbors?.related?.[type] || []).filter((item) => {
+    if (direction && item.direction !== direction) return false;
+    if (relation && neighborRelation(item) !== relation) return false;
+    return true;
+  });
+}
+
+function titleMatches(entity, q) {
+  if (!q) return true;
+  const hay = `${entity.title} ${entity.summary || ""}`.toLowerCase();
+  return hay.includes(q);
+}
+
+/** Searchable list that calls onPick(entity). Returns a re-render function. */
+function bindEntitySearchPicker({
+  listId,
+  searchId,
+  getCandidates,
+  isSelected,
+  onPick,
+  emptyNone,
+  limit = PICKER_HIT_LIMIT,
+}) {
+  const listEl = document.getElementById(listId);
+  const searchEl = document.getElementById(searchId);
+
+  function render() {
+    if (!listEl) return;
+    const q = (searchEl?.value || "").trim().toLowerCase();
+    const candidates = getCandidates();
+    const hits = candidates.filter((e) => !isSelected(e.id) && titleMatches(e, q));
+    if (!hits.length) {
+      listEl.innerHTML = `<p class="px-3 py-2 text-sm text-ink-faint">${
+        candidates.length ? "No matches." : emptyNone
+      }</p>`;
+      return;
+    }
+    listEl.innerHTML = hits
+      .slice(0, limit)
+      .map(
+        (e) => `
+      <button type="button" data-pick-id="${e.id}" class="w-full text-left px-3 py-2 text-sm hover:bg-paper-deep">
+        ${escapeHtml(e.title)}
+      </button>`
+      )
+      .join("");
+    listEl.querySelectorAll("[data-pick-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const ent = candidates.find((c) => c.id === btn.dataset.pickId);
+        if (ent) onPick(ent);
+      });
+    });
+  }
+
+  searchEl?.addEventListener("input", render);
+  render();
+  return render;
+}
+
+/** Chip row for Map<id, entity>. Returns a re-render function. */
+function bindRemovableChips({ chipsId, selected, emptyHtml, onChange }) {
+  const box = document.getElementById(chipsId);
+
+  function render() {
+    if (!box) return;
+    if (!selected.size) {
+      box.innerHTML = emptyHtml;
+      return;
+    }
+    box.innerHTML = [...selected.values()]
+      .map((e) => chipHtml(e.title, `data-rm-id="${e.id}"`))
+      .join("");
+    box.querySelectorAll("[data-rm-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selected.delete(btn.dataset.rmId);
+        render();
+        onChange?.();
+      });
+    });
+  }
+
+  render();
+  return render;
+}
+
 function renderCountryChips() {
   const box = document.getElementById("belong-chips-country");
   if (!box) return;
@@ -1899,20 +1996,66 @@ export async function openEditEvent(entityId, { onSaved } = {}) {
   });
 }
 
-/** Edit figure biography: name, summary, body, birth/death. */
+/** Edit figure: bio, country, related people (+ relationship), topics. */
 export async function openEditFigure(figure, { onSaved } = {}) {
   const birth = splitDateParts(figure.date_start);
   const death = splitDateParts(figure.date_end);
   const panel = document.getElementById("modal-panel");
+  if (!panel || !figure?.id) return;
+
+  let places = [];
+  let figures = [];
+  let topics = [];
+  let neighbors = { related: {} };
+  try {
+    [places, figures, topics, neighbors] = await Promise.all([
+      api.listEntities({ type: "place" }),
+      api.listEntities({ type: "figure" }),
+      api.listEntities({ type: "topic" }),
+      api.neighbors(figure.id),
+    ]);
+  } catch (err) {
+    toast(err.message || "Could not load figure links");
+    return;
+  }
+
+  const selectedCountry = new Map();
+  let countryItems = neighborItems(neighbors, "place", { direction: "out", relation: "involves" });
+  if (!countryItems.length) {
+    countryItems = neighborItems(neighbors, "place", { relation: "involves" });
+  }
+  for (const item of countryItems) selectedCountry.set(item.entity.id, item.entity);
+
+  const selectedPeople = new Map();
+  for (const item of neighborItems(neighbors, "figure", { direction: "out", relation: "related_to" })) {
+    selectedPeople.set(item.entity.id, {
+      entity: item.entity,
+      role: item.role || "",
+    });
+  }
+
+  const selectedTopics = new Map();
+  const initialTopicLinkIds = new Map();
+  for (const item of neighborItems(neighbors, "topic")) {
+    selectedTopics.set(item.entity.id, item.entity);
+    if (item.link_id) initialTopicLinkIds.set(item.entity.id, item.link_id);
+  }
+
+  places = sortByTitle(places);
+  figures = sortByTitle(figures.filter((f) => f.id !== figure.id));
+  topics = sortByTitle(topics);
+
+  const emptyChip = (msg) => `<p class="text-sm text-ink-faint">${msg}</p>`;
+
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">Edit biography</h2>
+        <h2 class="font-display text-xl">Edit figure</h2>
         <p class="text-sm text-ink-muted mt-0.5">${escapeHtml(figure.title)}</p>
       </div>
       <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
     </div>
-    <form id="fig-form" class="space-y-4">
+    <form id="fig-form" class="space-y-5 max-h-[70vh] overflow-y-auto pr-1">
       <div>
         <label class="label" for="fig-title">Name</label>
         <input id="fig-title" class="input" required maxlength="500" value="${escapeHtml(figure.title)}" />
@@ -1923,7 +2066,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
       </div>
       <div>
         <label class="label" for="fig-body">Full biography</label>
-        <textarea id="fig-body" class="textarea min-h-[140px]" placeholder="Longer notes (markdown)…">${escapeHtml(figure.body || "")}</textarea>
+        <textarea id="fig-body" class="textarea min-h-[100px]" placeholder="Longer notes (markdown)…">${escapeHtml(figure.body || "")}</textarea>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
@@ -1943,13 +2086,126 @@ export async function openEditFigure(figure, { onSaved } = {}) {
           </div>
         </div>
       </div>
-      <div class="flex justify-end gap-2 pt-2">
+
+      <div class="border-t border-paper-line pt-4 space-y-2">
+        <label class="label">Country</label>
+        <p class="text-xs text-ink-faint -mt-1">Where this person is associated.</p>
+        <div id="fig-country-chips" class="flex flex-wrap gap-1.5 min-h-[1.5rem]"></div>
+        <input id="fig-country-q" class="input" placeholder="Search countries…" autocomplete="off" />
+        <div id="fig-country-list" class="max-h-36 overflow-y-auto rounded-lg border border-paper-line divide-y divide-paper-line"></div>
+      </div>
+
+      <div class="border-t border-paper-line pt-4 space-y-2">
+        <label class="label">Related people</label>
+        <p class="text-xs text-ink-faint -mt-1">Tag other figures and name the relationship (e.g. mentor, rival, spouse).</p>
+        <div id="fig-people-chips" class="space-y-2"></div>
+        <input id="fig-people-q" class="input" placeholder="Search figures…" autocomplete="off" />
+        <div id="fig-people-list" class="max-h-36 overflow-y-auto rounded-lg border border-paper-line divide-y divide-paper-line"></div>
+      </div>
+
+      <div class="border-t border-paper-line pt-4 space-y-2">
+        <label class="label">Topics</label>
+        <p class="text-xs text-ink-faint -mt-1">Connect this person to themes you are studying.</p>
+        <div id="fig-topic-chips" class="flex flex-wrap gap-1.5 min-h-[1.5rem]"></div>
+        <input id="fig-topic-q" class="input" placeholder="Search topics…" autocomplete="off" />
+        <div id="fig-topic-list" class="max-h-36 overflow-y-auto rounded-lg border border-paper-line divide-y divide-paper-line"></div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2 sticky bottom-0 bg-white py-2">
         <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
-        <button type="submit" class="btn-primary px-5 py-2.5">Save bio</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Save</button>
       </div>
     </form>
   `;
   openModal();
+
+  function renderPeopleChips() {
+    const box = document.getElementById("fig-people-chips");
+    if (!box) return;
+    if (!selectedPeople.size) {
+      box.innerHTML = emptyChip("No related people yet.");
+      return;
+    }
+    box.innerHTML = [...selectedPeople.values()]
+      .map(
+        ({ entity, role }) => `
+      <div class="flex flex-wrap items-center gap-2 rounded-lg border border-paper-line bg-white px-2.5 py-2">
+        <span class="font-medium text-sm min-w-0 flex-1 truncate">${escapeHtml(entity.title)}</span>
+        <input data-role-for="${entity.id}" class="input text-sm py-1 max-w-[10rem] sm:max-w-[14rem]" maxlength="${LINK_ROLE_MAX_LENGTH}"
+          placeholder="Relationship" value="${escapeHtml(role || "")}" />
+        <button type="button" data-rm-person="${entity.id}" class="btn-ghost text-xs px-2 py-1 text-ink-muted">Remove</button>
+      </div>`
+      )
+      .join("");
+    box.querySelectorAll("[data-rm-person]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedPeople.delete(btn.dataset.rmPerson);
+        renderPeopleChips();
+        renderPeopleList();
+      });
+    });
+    box.querySelectorAll("[data-role-for]").forEach((input) => {
+      input.addEventListener("input", () => {
+        const row = selectedPeople.get(input.dataset.roleFor);
+        if (row) row.role = input.value;
+      });
+    });
+  }
+
+  let renderCountryList = () => {};
+  const renderCountryChips = bindRemovableChips({
+    chipsId: "fig-country-chips",
+    selected: selectedCountry,
+    emptyHtml: emptyChip("No country selected."),
+    onChange: () => renderCountryList(),
+  });
+  renderCountryList = bindEntitySearchPicker({
+    listId: "fig-country-list",
+    searchId: "fig-country-q",
+    getCandidates: () => places,
+    isSelected: (id) => selectedCountry.has(id),
+    emptyNone: "No countries in library yet.",
+    onPick: (ent) => {
+      selectedCountry.set(ent.id, ent);
+      renderCountryChips();
+      renderCountryList();
+    },
+  });
+
+  const renderPeopleList = bindEntitySearchPicker({
+    listId: "fig-people-list",
+    searchId: "fig-people-q",
+    getCandidates: () => figures,
+    isSelected: (id) => selectedPeople.has(id),
+    emptyNone: "No other figures yet.",
+    onPick: (ent) => {
+      selectedPeople.set(ent.id, { entity: ent, role: "" });
+      renderPeopleChips();
+      renderPeopleList();
+    },
+  });
+  renderPeopleChips();
+
+  let renderTopicList = () => {};
+  const renderTopicChips = bindRemovableChips({
+    chipsId: "fig-topic-chips",
+    selected: selectedTopics,
+    emptyHtml: emptyChip("Not in any topic yet."),
+    onChange: () => renderTopicList(),
+  });
+  renderTopicList = bindEntitySearchPicker({
+    listId: "fig-topic-list",
+    searchId: "fig-topic-q",
+    getCandidates: () => topics,
+    isSelected: (id) => selectedTopics.has(id),
+    emptyNone: "No topics yet — create one from the library.",
+    onPick: (ent) => {
+      selectedTopics.set(ent.id, ent);
+      renderTopicChips();
+      renderTopicList();
+    },
+  });
+
   document.getElementById("fig-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const title = document.getElementById("fig-title").value.trim();
@@ -1961,6 +2217,18 @@ export async function openEditFigure(figure, { onSaved } = {}) {
     const deathEra = document.querySelector('input[name="fig-death-era"]:checked')?.value || "ac";
     const birthYear = document.getElementById("fig-birth-year").value.trim();
     const deathYear = document.getElementById("fig-death-year").value.trim();
+
+    document.querySelectorAll("[data-role-for]").forEach((input) => {
+      const row = selectedPeople.get(input.dataset.roleFor);
+      if (row) row.role = input.value.trim();
+    });
+
+    const figure_ids = [...selectedPeople.keys()];
+    const figure_roles = {};
+    for (const [id, row] of selectedPeople) {
+      if (row.role) figure_roles[id] = row.role;
+    }
+
     try {
       const saved = await api.updateEntity(figure.id, {
         title,
@@ -1968,7 +2236,25 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         body: document.getElementById("fig-body").value.trim() || null,
         date_start: composeDate(birthYear || null, null, null, birthEra),
         date_end: composeDate(deathYear || null, null, null, deathEra),
+        country_ids: [...selectedCountry.keys()],
+        figure_ids,
+        figure_roles,
       });
+
+      const nextTopicIds = new Set(selectedTopics.keys());
+      for (const [tid, linkId] of initialTopicLinkIds) {
+        if (!nextTopicIds.has(tid) && linkId) await api.deleteLink(linkId);
+      }
+      for (const tid of nextTopicIds) {
+        if (!initialTopicLinkIds.has(tid)) {
+          await api.createLink({
+            source_id: tid,
+            target_id: figure.id,
+            relation: "part_of",
+          });
+        }
+      }
+
       toast(`Updated “${saved.title}”`);
       closeModal();
       if (onSaved) onSaved(saved);
@@ -2503,7 +2789,7 @@ export async function openAddTopic({
         ]
           .filter(Boolean)
           .join(" and ")}.`
-      : "You can add events and phases to it afterward.";
+      : "You can add events, phases, and figures to it afterward.";
 
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
@@ -2555,31 +2841,29 @@ export async function openAddTopic({
   });
 }
 
-/** Link existing events or phases into a topic. */
+/** Link existing events, phases, or figures into a topic. */
 export async function openAddToTopic(topic, { kind = "event", onSaved } = {}) {
   const panel = document.getElementById("modal-panel");
   if (!panel || !topic?.id) return;
-  const isPhase = kind === "phase";
-  const type = isPhase ? "phase" : "event";
+  const type = kind === "phase" ? "phase" : kind === "figure" ? "figure" : "event";
+  const label = type;
   let candidates = [];
-  let linked = new Set();
+  const linked = new Set();
   try {
     const [list, neighbors] = await Promise.all([
       api.listEntities({ type }),
       api.neighbors(topic.id),
     ]);
-    for (const item of neighbors.related?.[type] || []) linked.add(item.entity.id);
-    for (const item of neighbors.related?.milestone || []) linked.add(item.entity.id);
-    candidates = list
-      .filter((e) => !linked.has(e.id))
-      .slice()
-      .sort((a, b) => a.title.localeCompare(b.title));
+    for (const item of neighborItems(neighbors, type)) linked.add(item.entity.id);
+    if (type === "event") {
+      for (const item of neighborItems(neighbors, "milestone")) linked.add(item.entity.id);
+    }
+    candidates = sortByTitle(list.filter((e) => !linked.has(e.id)));
   } catch (err) {
     toast(err.message || "Could not load items");
     return;
   }
 
-  const label = isPhase ? "phase" : "event";
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
@@ -2596,57 +2880,30 @@ export async function openAddToTopic(topic, { kind = "event", onSaved } = {}) {
   `;
   openModal();
 
-  const listEl = document.getElementById("topic-member-list");
-  const qEl = document.getElementById("topic-member-q");
-
-  function renderList() {
-    const q = (qEl?.value || "").trim().toLowerCase();
-    const hits = candidates.filter((e) => !q || e.title.toLowerCase().includes(q) || (e.summary || "").toLowerCase().includes(q));
-    if (!hits.length) {
-      listEl.innerHTML = `<p class="px-3 py-4 text-sm text-ink-faint">${
-        candidates.length === 0
-          ? `No ${label}s left to add — create one from the library first.`
-          : "No matches."
-      }</p>`;
-      return;
-    }
-    listEl.innerHTML = hits
-      .slice(0, 40)
-      .map(
-        (e) => `
-      <button type="button" data-add-member="${e.id}"
-        class="w-full text-left px-3 py-2.5 hover:bg-paper-deep text-sm flex items-center justify-between gap-2">
-        <span class="min-w-0">
-          <span class="font-medium block truncate">${escapeHtml(e.title)}</span>
-          ${e.summary ? `<span class="text-xs text-ink-faint line-clamp-1">${escapeHtml(e.summary)}</span>` : ""}
-        </span>
-        <span class="text-[11px] text-accent-dark shrink-0">Add</span>
-      </button>`
-      )
-      .join("");
-    listEl.querySelectorAll("[data-add-member]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.addMember;
-        try {
-          await api.createLink({
-            source_id: topic.id,
-            target_id: id,
-            relation: "part_of",
-          });
-          candidates = candidates.filter((e) => e.id !== id);
-          toast("Added to topic");
-          renderList();
-          if (onSaved) onSaved();
-        } catch (err) {
-          toast(err.message || "Could not add");
-        }
-      });
-    });
-  }
-
-  qEl?.addEventListener("input", renderList);
-  renderList();
-  queueMicrotask(() => qEl?.focus());
+  const renderList = bindEntitySearchPicker({
+    listId: "topic-member-list",
+    searchId: "topic-member-q",
+    getCandidates: () => candidates,
+    isSelected: () => false,
+    emptyNone: `No ${label}s left to add — create one from the library first.`,
+    limit: 40,
+    onPick: async (ent) => {
+      try {
+        await api.createLink({
+          source_id: topic.id,
+          target_id: ent.id,
+          relation: "part_of",
+        });
+        candidates = candidates.filter((e) => e.id !== ent.id);
+        toast("Added to topic");
+        renderList();
+        if (onSaved) onSaved();
+      } catch (err) {
+        toast(err.message || "Could not add");
+      }
+    },
+  });
+  queueMicrotask(() => document.getElementById("topic-member-q")?.focus());
 }
 
 export { closeModal };

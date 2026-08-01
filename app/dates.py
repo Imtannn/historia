@@ -113,6 +113,11 @@ def date_sort_key(value: Optional[str]) -> tuple:
     return (0, year, month, day)
 
 
+def format_year_number(year: int) -> str:
+    """Absolute year with thousands separators (e.g. 3300 → '3,300')."""
+    return f"{abs(int(year)):,}"
+
+
 def format_display_date(value: Optional[str]) -> str:
     """Human-readable date for UI badges — uses BC / AC labels."""
     if not value or not str(value).strip():
@@ -121,7 +126,7 @@ def format_display_date(value: Optional[str]) -> str:
     if parsed is None:
         return ""
     year, _month, _day = parsed
-    abs_year = abs(year)
+    year_label = format_year_number(year)
     era = "BC" if year < 0 else "AC"
 
     body = value.lstrip("-")
@@ -130,10 +135,10 @@ def format_display_date(value: Optional[str]) -> str:
     has_day = len(parts) >= 3 and parts[2].isdigit()
 
     if has_day and has_month:
-        return f"{int(parts[2])}/{int(parts[1])}/{abs_year} {era}"
+        return f"{int(parts[2])}/{int(parts[1])}/{year_label} {era}"
     if has_month:
-        return f"{int(parts[1])}/{abs_year} {era}"
-    return f"{abs_year} {era}"
+        return f"{int(parts[1])}/{year_label} {era}"
+    return f"{year_label} {era}"
 
 
 def format_date_range(start: Optional[str], end: Optional[str]) -> str:
