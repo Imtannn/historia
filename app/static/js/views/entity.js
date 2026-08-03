@@ -12,7 +12,7 @@ import {
   toast,
   compareByDateThenTitle,
 } from "../util.js";
-import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openEditCountry, openAddPhase, openAddMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
+import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openEditCountry, openAddPhase, openAddMilestone, openEditMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
 
 const GROUP_ORDER = ["event", "phase", "period", "place", "figure", "topic", "milestone", "timeline"];
 const GROUP_TITLES = {
@@ -35,6 +35,142 @@ function groupList(related) {
 
 function groupTitle(key, overrides = {}) {
   return overrides[key] || GROUP_TITLES[key] || typeLabel(key);
+}
+
+const TOPIC_REORDER_KINDS = new Set(["event", "phase", "figure", "milestone"]);
+const TOPIC_ORDER_RE = /<!--\s*historia-order:\s*(\{[\s\S]*?\})\s*-->/;
+
+function parseTopicOrder(body) {
+  const m = String(body || "").match(TOPIC_ORDER_RE);
+  if (!m) return {};
+  try {
+    const parsed = JSON.parse(m[1]);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function embedTopicOrder(body, order) {
+  const base = String(body || "").replace(TOPIC_ORDER_RE, "").trim();
+  const tag = `<!-- historia-order:${JSON.stringify(order)} -->`;
+  return base ? `${base}\n\n${tag}` : tag;
+}
+
+function sortItemsByTopicOrder(items, kind, orderMap) {
+  const ids = orderMap[kind];
+  if (!ids?.length) {
+    return [...items].sort((a, b) => {
+      const ao = a.sort_order ?? 0;
+      const bo = b.sort_order ?? 0;
+      if (ao !== bo) return ao - bo;
+      return a.entity.title.localeCompare(b.entity.title);
+    });
+  }
+  const rank = new Map(ids.map((id, i) => [id, i]));
+  return [...items].sort((a, b) => {
+    const ra = rank.has(a.entity.id) ? rank.get(a.entity.id) : 9999;
+    const rb = rank.has(b.entity.id) ? rank.get(b.entity.id) : 9999;
+    if (ra !== rb) return ra - rb;
+    return a.entity.title.localeCompare(b.entity.title);
+  });
+}
+
+function orderedTopicRelated(related, topicBody) {
+  const order = parseTopicOrder(topicBody);
+  const out = { ...related };
+  for (const key of TOPIC_REORDER_KINDS) {
+    if (out[key]?.length) {
+      out[key] = sortItemsByTopicOrder(out[key], key, order);
+    }
+  }
+  return out;
+}
+
+function topicMemberRowHtml(item, index, total) {
+  const ent = item.entity;
+  const r = formatDate(ent.date_start);
+  const isFirst = index === 0;
+  const isLast = index === total - 1;
+  return `
+  <div class="entity-row items-center gap-2 !cursor-default" data-topic-member-row data-entity-id="${ent.id}">
+    <div class="flex flex-col shrink-0">
+      <button type="button" class="topic-move-up btn-ghost text-xs px-2 py-0.5 leading-none ${isFirst ? "opacity-30" : ""}" aria-label="Move up" ${isFirst ? "disabled" : ""}>↑</button>
+      <button type="button" class="topic-move-down btn-ghost text-xs px-2 py-0.5 leading-none ${isLast ? "opacity-30" : ""}" aria-label="Move down" ${isLast ? "disabled" : ""}>↓</button>
+    </div>
+    <a href="#/entity/${ent.id}" class="flex-1 min-w-0 no-underline text-inherit">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-medium">${escapeHtml(ent.title)}</span>
+        ${r ? `<span class="text-xs text-ink-faint">${escapeHtml(r)}</span>` : ""}
+      </div>
+      ${ent.summary ? `<p class="text-sm text-ink-muted mt-0.5 line-clamp-1">${escapeHtml(ent.summary)}</p>` : ""}
+    </a>
+  </div>`;
+}
+
+function topicMemberSectionsHtml(related, groups) {
+  const titleOverrides = {
+    event: "Events in this topic",
+    phase: "Phases in this topic",
+    figure: "Figures in this topic",
+    milestone: "Moments in this topic",
+  };
+  return groups
+    .filter((key) => TOPIC_REORDER_KINDS.has(key))
+    .map((key) => {
+      const items = related[key] || [];
+      const title = titleOverrides[key] || groupTitle(key);
+      return `
+      <section class="mb-8">
+        <h2 class="font-display text-xl mb-1">${title}</h2>
+        <p class="text-xs text-ink-faint mb-3">Use ↑ ↓ to change order.</p>
+        <div class="space-y-2" data-topic-member-list data-kind="${key}">
+          ${items.map((item, i) => topicMemberRowHtml(item, i, items.length)).join("")}
+        </div>
+      </section>`;
+    })
+    .join("");
+}
+
+function bindTopicMemberReorder(topicId, root, topic) {
+  root.querySelectorAll("[data-topic-member-list]").forEach((list) => {
+    const kind = list.dataset.kind;
+    list.querySelectorAll(".topic-move-up, .topic-move-down").forEach((btn) => {
+      btn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const row = btn.closest("[data-topic-member-row]");
+        if (!row) return;
+        const rows = [...list.querySelectorAll("[data-topic-member-row]")];
+        const idx = rows.indexOf(row);
+        if (idx < 0) return;
+        const delta = btn.classList.contains("topic-move-up") ? -1 : 1;
+        const next = idx + delta;
+        if (next < 0 || next >= rows.length) return;
+        const ids = rows.map((r) => r.dataset.entityId);
+        [ids[idx], ids[next]] = [ids[next], ids[idx]];
+
+        async function saveOrder() {
+          const order = { ...parseTopicOrder(topic.body) };
+          order[kind] = ids;
+          await api.updateEntity(topicId, { body: embedTopicOrder(topic.body, order) });
+          try {
+            await api.reorderTopicMembers(topicId, { kind, ordered_entity_ids: ids });
+          } catch {
+            /* link sync optional on older servers */
+          }
+        }
+
+        try {
+          await saveOrder();
+          location.hash = `/entity/${topicId}`;
+          window.dispatchEvent(new HashChangeEvent("hashchange"));
+        } catch (err) {
+          toast(err.message || "Could not save order");
+        }
+      });
+    });
+  });
 }
 
 function lifeTimelineHtml(e, lifeEvents) {
@@ -213,19 +349,46 @@ function milestonesSectionHtml(milestones) {
             return `
             <li class="relative pb-5 last:pb-0">
               <span class="absolute -left-[1.4rem] top-1.5 h-2.5 w-2.5 rounded-full bg-accent ring-4 ring-paper"></span>
-              <a href="#/entity/${ent.id}" class="block rounded-xl border border-paper-line bg-white p-3 hover:border-accent/40 no-underline text-inherit">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-medium">${escapeHtml(ent.title)}</span>
-                  <span class="type-badge">Moment</span>
-                  ${r ? `<span class="text-xs text-ink-faint tabular-nums">${escapeHtml(r)}</span>` : ""}
+              <div class="rounded-xl border border-paper-line bg-white p-3 hover:border-accent/40">
+                <div class="flex items-start gap-2">
+                  <a href="#/entity/${ent.id}" class="flex-1 min-w-0 no-underline text-inherit">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="font-medium">${escapeHtml(ent.title)}</span>
+                      <span class="type-badge">Moment</span>
+                      ${r ? `<span class="text-xs text-ink-faint tabular-nums">${escapeHtml(r)}</span>` : ""}
+                    </div>
+                    ${ent.summary ? `<p class="text-sm text-ink-muted mt-1">${escapeHtml(ent.summary)}</p>` : ""}
+                  </a>
+                  <button type="button" class="milestone-edit-btn btn-ghost text-xs px-2 py-1 shrink-0" data-milestone-id="${ent.id}">Edit</button>
                 </div>
-                ${ent.summary ? `<p class="text-sm text-ink-muted mt-1">${escapeHtml(ent.summary)}</p>` : ""}
-              </a>
+              </div>
             </li>`;
           })
           .join("")}
       </ol>
     </section>`;
+}
+
+function bindMilestoneEditButtons(root, parentEvent) {
+  root.querySelectorAll(".milestone-edit-btn").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const id = btn.dataset.milestoneId;
+      if (!id) return;
+      try {
+        const milestone = await api.getEntity(id);
+        openEditMilestone(milestone, parentEvent, {
+          onSaved: () => {
+            location.hash = `/entity/${parentEvent.id}`;
+            window.dispatchEvent(new HashChangeEvent("hashchange"));
+          },
+        });
+      } catch (err) {
+        toast(err.message || "Could not open moment");
+      }
+    });
+  });
 }
 
 function renderEventDetail(root, data, e, bodyHtml) {
@@ -396,7 +559,11 @@ function renderGenericHub(root, data, e, bodyHtml) {
   const isPeriod = e.type === "period";
   const isPhase = e.type === "phase";
   const isPlace = e.type === "place";
-  const backHref = isTopic
+  const isMilestone = e.type === "milestone";
+  const parentEvent = data.parent;
+  const backHref = isMilestone && parentEvent
+    ? `#/entity/${parentEvent.id}`
+    : isTopic
     ? "#/library?tab=topics"
     : isPeriod
       ? "#/library?tab=periods"
@@ -405,7 +572,9 @@ function renderGenericHub(root, data, e, bodyHtml) {
         : e.type === "place"
           ? "#/library?tab=countries"
           : "#/library";
-  const backLabel = isTopic
+  const backLabel = isMilestone && parentEvent
+    ? "Event"
+    : isTopic
     ? "Topics"
     : isPeriod
       ? "Periods"
@@ -420,7 +589,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
   const phaseItems = related.phase || [];
   if (isPeriod || isPhase) delete related.event;
   if (isPeriod) delete related.phase;
-  const groups = groupList(related);
+  const topicRelated = isTopic ? orderedTopicRelated(related, e.body) : related;
+  const groups = groupList(isTopic ? topicRelated : related);
   const attachments = e.attachments || [];
 
   root.innerHTML = `
@@ -474,6 +644,11 @@ function renderGenericHub(root, data, e, bodyHtml) {
         ${
           isPlace
             ? `<button type="button" id="country-edit" class="btn-secondary text-sm px-3 py-1.5">Edit country</button>`
+            : ""
+        }
+        ${
+          isMilestone
+            ? `<button type="button" id="milestone-edit" class="btn-secondary text-sm px-3 py-1.5">Edit moment</button>`
             : ""
         }
         <button type="button" id="entity-delete" class="btn-ghost text-sm text-red-700 hover:bg-red-50">Delete</button>
@@ -572,18 +747,12 @@ function renderGenericHub(root, data, e, bodyHtml) {
               <button type="button" id="${isPhase ? "phase-add-event-section" : "period-add-event-section"}" class="btn-primary text-sm px-3 py-1.5">Add event</button>
             </section>`
         : groups.length
-          ? groups
+          ? isTopic
+            ? topicMemberSectionsHtml(topicRelated, groups)
+            : groups
               .map((key) => {
                 const items = data.related[key];
-                const title = groupTitle(key, {
-                  ...(isTopic
-                    ? {
-                        event: "Events in this topic",
-                        phase: "Phases in this topic",
-                        figure: "Figures in this topic",
-                      }
-                    : {}),
-                });
+                const title = groupTitle(key);
                 return `
               <section class="mb-8">
                 <h2 class="font-display text-xl mb-3">${title}</h2>
@@ -872,8 +1041,12 @@ export async function renderEntity(root, { params }) {
 
   let bodyHtml = "";
   if (e.body) {
-    const md = await api.renderMarkdown(e.body);
-    bodyHtml = md.html;
+    const bodyForMd =
+      e.type === "topic" ? String(e.body).replace(TOPIC_ORDER_RE, "").trim() : e.body;
+    if (bodyForMd) {
+      const md = await api.renderMarkdown(bodyForMd);
+      bodyHtml = md.html;
+    }
   }
 
   if (e.type === "figure") {
@@ -929,6 +1102,15 @@ export async function renderEntity(root, { params }) {
     });
   });
 
+  document.getElementById("milestone-edit")?.addEventListener("click", () => {
+    openEditMilestone(e, data.parent, {
+      onSaved: () => {
+        location.hash = `/entity/${e.id}`;
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      },
+    });
+  });
+
   if (e.type === "figure") {
     bindLifeMoment(e);
   }
@@ -956,10 +1138,12 @@ export async function renderEntity(root, { params }) {
     document.getElementById("topic-add-event-empty")?.addEventListener("click", addEvent);
     document.getElementById("topic-add-phase-empty")?.addEventListener("click", addPhase);
     document.getElementById("topic-add-figure-empty")?.addEventListener("click", addFigure);
+    bindTopicMemberReorder(e.id, root, e);
   }
 
   if (e.type === "event") {
     bindEventAddPhase(e);
+    bindMilestoneEditButtons(root, e);
     const openMs = () => {
       openAddMilestone(e, {
         onSaved: () => {

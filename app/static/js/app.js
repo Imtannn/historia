@@ -71,7 +71,9 @@ bindShell();
 refreshHeader();
 
 api.health().then((h) => {
-  if (h?.version == null || h.version < 2) {
+  if (h?.features?.topic_reorder !== true) {
+    toast("Restart server for topic reorder — run: npm run restart", 9000);
+  } else if (h?.version == null || h.version < 2) {
     toast("Server needs restart — run: npm run restart", 8000);
   }
 }).catch(() => {});

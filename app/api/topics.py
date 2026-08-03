@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import get_session
 from app.models import (
@@ -14,12 +14,14 @@ from app.models import (
     RelationType,
     ReviewState,
     TopicCreate,
+    TopicMemberOrderUpdate,
     utcnow,
 )
 
 router = APIRouter(prefix="/topics", tags=["topics"])
 
 _EVENT_LIKE = frozenset({EntityType.event, EntityType.milestone})
+_TOPIC_MEMBER_KINDS = frozenset({"event", "phase", "figure", "milestone"})
 _TOPIC_MEMBER_SPECS: tuple[tuple[str, frozenset[EntityType], str], ...] = (
     ("event_ids", _EVENT_LIKE, "Event"),
     ("phase_ids", frozenset({EntityType.phase}), "Phase"),
@@ -63,6 +65,68 @@ def _collect_topic_members(
     return unique
 
 
+def apply_topic_member_order(
+    session: Session, topic_id: str, payload: TopicMemberOrderUpdate
+) -> dict:
+    topic = session.get(Entity, topic_id)
+    if not topic or topic.type != EntityType.topic:
+        raise HTTPException(404, "Topic not found")
+
+    kind = payload.kind.strip().lower()
+    if kind not in _TOPIC_MEMBER_KINDS:
+        raise HTTPException(400, "kind must be event, phase, figure, or milestone")
+
+    allowed = (
+        _EVENT_LIKE
+        if kind == "event"
+        else frozenset({EntityType.milestone})
+        if kind == "milestone"
+        else frozenset({EntityType.phase if kind == "phase" else EntityType.figure})
+    )
+
+    outgoing = session.exec(
+        select(Link).where(
+            Link.source_id == topic_id,
+            Link.relation == RelationType.part_of,
+        )
+    ).all()
+    incoming = session.exec(
+        select(Link).where(
+            Link.target_id == topic_id,
+            Link.relation == RelationType.part_of,
+        )
+    ).all()
+    by_member: dict[str, Link] = {}
+    for link in outgoing:
+        by_member[link.target_id] = link
+    for link in incoming:
+        by_member.setdefault(link.source_id, link)
+
+    seen: set[str] = set()
+    ordered_ids: list[str] = []
+    for eid in payload.ordered_entity_ids:
+        if eid in seen:
+            continue
+        seen.add(eid)
+        ordered_ids.append(eid)
+
+    for eid in ordered_ids:
+        link = by_member.get(eid)
+        if not link:
+            raise HTTPException(400, f"Not a member of this topic: {eid}")
+        ent = session.get(Entity, eid)
+        if not ent or ent.type not in allowed:
+            raise HTTPException(400, f"Invalid {kind} member: {eid}")
+
+    for idx, eid in enumerate(ordered_ids):
+        link = by_member[eid]
+        link.sort_order = idx
+        session.add(link)
+
+    session.commit()
+    return {"ok": True, "kind": kind, "count": len(ordered_ids)}
+
+
 @router.post("", response_model=EntityRead, status_code=201)
 def create_topic(payload: TopicCreate, session: Session = Depends(get_session)) -> EntityRead:
     title = payload.title.strip()
@@ -89,15 +153,28 @@ def create_topic(payload: TopicCreate, session: Session = Depends(get_session)) 
     session.flush()
     session.add(ReviewState(entity_id=topic.id))
 
-    for mid, _ in unique_members:
+    next_order: dict[EntityType, int] = {}
+    for mid, mtype in unique_members:
+        order = next_order.get(mtype, 0)
+        next_order[mtype] = order + 1
         session.add(
             Link(
                 source_id=topic.id,
                 target_id=mid,
                 relation=RelationType.part_of,
+                sort_order=order,
             )
         )
 
     session.commit()
     session.refresh(topic)
     return EntityRead.model_validate(topic)
+
+
+@router.patch("/{topic_id}/member-order", response_model=dict)
+def reorder_topic_members(
+    topic_id: str,
+    payload: TopicMemberOrderUpdate,
+    session: Session = Depends(get_session),
+) -> dict:
+    return apply_topic_member_order(session, topic_id, payload)

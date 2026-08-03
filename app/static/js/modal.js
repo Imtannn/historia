@@ -1213,6 +1213,78 @@ async function ensurePlacesForNames(names) {
   return ids;
 }
 
+async function loadSavedCountries() {
+  try {
+    hubs.country = await api.listEntities({ type: "place" });
+    hubs.country.sort((a, b) => a.title.localeCompare(b.title));
+  } catch {
+    hubs.country = hubs.country || [];
+  }
+  return hubs.country;
+}
+
+function savedCountryFlag(place) {
+  const summary = (place.summary || "").trim();
+  return flagForCountry(place.title) || (summary && !summary.includes(" ") ? summary : "");
+}
+
+function renderSavedCountryCatalog({ boxId, searchId, excludeNames = [], onPick, mode = "pick" }) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const qRaw = (document.getElementById(searchId)?.value || "").trim();
+  const q = qRaw.toLowerCase();
+  const excluded = new Set(excludeNames.map((n) => String(n).toLowerCase()));
+  const places = (hubs.country || [])
+    .filter((p) => !excluded.has(p.title.toLowerCase()))
+    .filter((p) => matchesQ(p.title, q))
+    .sort((a, b) => {
+      if (a.title === "World") return -1;
+      if (b.title === "World") return 1;
+      return a.title.localeCompare(b.title);
+    });
+
+  const exactMatch =
+    places.some((p) => p.title.toLowerCase() === q) || excluded.has(q);
+  const canCreate = q.length >= 1 && !exactMatch;
+
+  let html = "";
+  if (places.length) {
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your countries</p>`;
+    html += places
+      .map((p) => {
+        const flag = savedCountryFlag(p);
+        return `
+      <button type="button" data-pick-country="${escapeHtml(p.title)}"
+        class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-paper-deep text-sm flex items-center gap-2">
+        ${flag ? `<span class="text-base leading-none">${flag}</span>` : ""}
+        <span class="flex-1 min-w-0">${escapeHtml(p.title)}</span>
+        <span class="text-[11px] text-accent-dark shrink-0">${mode === "fill" ? "Select" : "Add"}</span>
+      </button>`;
+      })
+      .join("");
+  } else if (!q) {
+    html += `<p class="text-xs text-ink-faint px-2 py-2">No countries yet — type a name to add one.</p>`;
+  } else {
+    html += `<p class="text-xs text-ink-faint px-2 py-2">No matches in your countries.</p>`;
+  }
+
+  if (canCreate) {
+    html += `
+    <button type="button" data-create-country="${escapeHtml(qRaw)}"
+      class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-accent-soft text-sm text-accent-dark font-medium border-t border-paper-line mt-1">
+      ${mode === "fill" ? "Use" : "Add"} “${escapeHtml(qRaw)}”
+    </button>`;
+  }
+
+  box.innerHTML = html;
+  box.querySelectorAll("[data-pick-country]").forEach((btn) => {
+    btn.addEventListener("click", () => onPick(btn.dataset.pickCountry));
+  });
+  box.querySelectorAll("[data-create-country]").forEach((btn) => {
+    btn.addEventListener("click", () => onPick(btn.dataset.createCountry));
+  });
+}
+
 async function ensureEmpire(name, flagHint = "") {
   const existing = hubs.country.find((e) => e.title.toLowerCase() === name.toLowerCase());
   if (existing) {
@@ -1701,11 +1773,12 @@ function eventCountriesBlockHtml() {
   return `
     <div>
       <label class="label" for="qa-country-input">Countries / territories</label>
-      <p class="text-xs text-ink-faint -mt-1">Add all involved — e.g. Germany, France, UK for World War I.</p>
+      <p class="text-xs text-ink-faint -mt-1">Pick from your countries or type a new name — e.g. Germany, France, Rome.</p>
       <div class="flex gap-2">
-        <input id="qa-country-input" class="input flex-1" maxlength="500" placeholder="Type a country…" autocomplete="off" />
+        <input id="qa-country-input" class="input flex-1" maxlength="500" placeholder="Search or type a country…" autocomplete="off" />
         <button type="button" id="qa-country-add" class="btn-secondary px-3 shrink-0">Add</button>
       </div>
+      <div id="qa-country-catalog" class="mt-2 max-h-40 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
       <div id="qa-country-chips" class="flex flex-wrap gap-1.5 mt-2 min-h-[1.5rem]"></div>
     </div>`;
 }
@@ -1735,6 +1808,26 @@ function renderEventCountryChips(countries) {
 }
 
 function bindEventCountryHandlers(countries) {
+  function refreshCatalog() {
+    renderSavedCountryCatalog({
+      boxId: "qa-country-catalog",
+      searchId: "qa-country-input",
+      excludeNames: countries,
+      onPick: (name) => {
+        if (!name) return;
+        if (countries.some((c) => c.toLowerCase() === name.toLowerCase())) {
+          toast("Already added");
+          return;
+        }
+        countries.push(name);
+        const input = document.getElementById("qa-country-input");
+        if (input) input.value = "";
+        renderEventCountryChips(countries);
+        refreshCatalog();
+      },
+    });
+  }
+
   function addCountry() {
     const input = document.getElementById("qa-country-input");
     const val = input?.value.trim();
@@ -1746,6 +1839,7 @@ function bindEventCountryHandlers(countries) {
     countries.push(val);
     if (input) input.value = "";
     renderEventCountryChips(countries);
+    refreshCatalog();
   }
   document.getElementById("qa-country-add")?.addEventListener("click", addCountry);
   document.getElementById("qa-country-input")?.addEventListener("keydown", (e) => {
@@ -1754,7 +1848,9 @@ function bindEventCountryHandlers(countries) {
       addCountry();
     }
   });
+  document.getElementById("qa-country-input")?.addEventListener("input", refreshCatalog);
   renderEventCountryChips(countries);
+  refreshCatalog();
 }
 
 function renderTagChips(tags) {
@@ -2376,9 +2472,28 @@ function figureCountryFieldHtml(value = "") {
   return `
     <div>
       <label class="label" for="fig-country">Country / territory <span class="font-normal text-ink-faint">(optional)</span></label>
-      <p class="text-xs text-ink-faint -mt-1">Type any name — modern or historic (e.g. Wessex, Frankish Empire).</p>
-      <input id="fig-country" class="input" maxlength="500" placeholder="e.g. Kingdom of Wessex" value="${escapeHtml(value)}" autocomplete="off" />
+      <p class="text-xs text-ink-faint -mt-1">Pick from your countries or type a new name — modern or historic.</p>
+      <input id="fig-country" class="input" maxlength="500" placeholder="Search or type a country…" value="${escapeHtml(value)}" autocomplete="off" />
+      <div id="fig-country-catalog" class="mt-2 max-h-40 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
     </div>`;
+}
+
+function bindFigureCountryHandlers() {
+  function refreshCatalog() {
+    renderSavedCountryCatalog({
+      boxId: "fig-country-catalog",
+      searchId: "fig-country",
+      excludeNames: [],
+      mode: "fill",
+      onPick: (name) => {
+        const input = document.getElementById("fig-country");
+        if (input) input.value = name;
+        refreshCatalog();
+      },
+    });
+  }
+  document.getElementById("fig-country")?.addEventListener("input", refreshCatalog);
+  refreshCatalog();
 }
 
 function bindFigureFormSubmit(formId, onSubmit) {
@@ -2416,6 +2531,7 @@ export async function openAddFigure({ onSaved } = {}) {
   const catResult = await loadUserCategories();
   userCategories = catResult.categories;
   categoriesError = catResult.error;
+  await loadSavedCountries();
   attachments = [];
   const empty = { year: "", month: "", day: "", era: "ac" };
   panel.innerHTML = `
@@ -2452,6 +2568,7 @@ export async function openAddFigure({ onSaved } = {}) {
   openModal();
   renderAttachments();
   bindMediaHandlers();
+  bindFigureCountryHandlers();
   bindFigureFormSubmit("fig-add-form", async (payload) => {
     try {
       const countryName = payload.place_name || "";
@@ -2507,6 +2624,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
     toast(err.message || "Could not load figure links");
     return;
   }
+  await loadSavedCountries();
   attachments = [...(figure.attachments || [])];
 
   let countryName = figure.place_name || "";
@@ -2591,6 +2709,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
   openModal();
   renderAttachments();
   bindMediaHandlers();
+  bindFigureCountryHandlers();
 
   function renderPeopleChips() {
     const box = document.getElementById("fig-people-chips");
@@ -3238,21 +3357,50 @@ export function bindModalChrome() {
 
 /** Add a moment (sub-point) under a parent event. */
 export async function openAddMilestone(parentEvent, { onSaved } = {}) {
+  return openMilestoneForm({ parentEvent, onSaved });
+}
+
+/** Edit an existing moment under its parent event. */
+export async function openEditMilestone(milestone, parentEvent, { onSaved } = {}) {
+  return openMilestoneForm({ milestone, parentEvent, onSaved });
+}
+
+async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}) {
+  const isEdit = Boolean(milestone?.id);
+  let parent = parentEvent;
+  if (!parent?.id && milestone?.parent_id) {
+    try {
+      parent = await api.getEntity(milestone.parent_id);
+    } catch {
+      toast("Could not load parent event");
+      return;
+    }
+  }
+  if (!parent?.id) {
+    toast("Could not find parent event for this moment");
+    return;
+  }
+
   const panel = document.getElementById("modal-panel");
   if (!panel) {
     toast("Could not open form");
     return;
   }
   const parentRange =
-    formatRange(parentEvent.date_start, parentEvent.date_end) ||
-    (parentEvent.date_start ? formatRange(parentEvent.date_start, null) : "");
-  const parentStart = storedToSignedYear(parentEvent.date_start);
-  const parentEnd = storedToSignedYear(parentEvent.date_end) ?? parentStart;
+    formatRange(parent.date_start, parent.date_end) ||
+    (parent.date_start ? formatRange(parent.date_start, null) : "");
+  const parentStart = storedToSignedYear(parent.date_start);
+  const parentEnd = storedToSignedYear(parent.date_end) ?? parentStart;
+  const fromParts = isEdit ? splitDateParts(milestone.date_start) : { year: "", month: "", day: "", era: "ac" };
+  const toParts = isEdit
+    ? splitDateParts(milestone.date_end)
+    : { year: "", month: "", day: "", era: fromParts.era || "ac" };
+
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">Add moment</h2>
-        <p class="text-sm text-ink-muted mt-0.5">Inside ${escapeHtml(parentEvent.title)}${
+        <h2 class="font-display text-xl">${isEdit ? "Edit moment" : "Add moment"}</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Inside ${escapeHtml(parent.title)}${
           parentRange ? ` · must fall within ${escapeHtml(parentRange)}` : ""
         }</p>
       </div>
@@ -3261,50 +3409,50 @@ export async function openAddMilestone(parentEvent, { onSaved } = {}) {
     <form id="milestone-form" class="space-y-4">
       <div>
         <label class="label" for="ms-title">What happened?</label>
-        <input id="ms-title" class="input text-lg" required maxlength="500" placeholder="e.g. Imperial Guard advances" autofocus />
+        <input id="ms-title" class="input text-lg" required maxlength="500" placeholder="e.g. Imperial Guard advances" value="${escapeHtml(isEdit ? milestone.title : "")}" autofocus />
       </div>
       <div>
         <label class="label" for="ms-summary">Note <span class="font-normal text-ink-faint">(optional)</span></label>
-        <textarea id="ms-summary" class="textarea" placeholder="Short note…"></textarea>
+        <textarea id="ms-summary" class="textarea" placeholder="Short note…">${escapeHtml(isEdit ? milestone.summary || "" : "")}</textarea>
       </div>
       <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
         <p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold">Date</p>
         <div>
           <p class="text-xs font-medium text-ink-muted mb-1">From</p>
           <div class="grid grid-cols-3 gap-2">
-            <input id="ms-from-day" class="input" type="number" min="1" max="31" placeholder="Day" />
-            <input id="ms-from-month" class="input" type="number" min="1" max="12" placeholder="Month" />
-            <input id="ms-from-year" class="input" type="number" placeholder="Year" />
+            <input id="ms-from-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(fromParts.day)}" />
+            <input id="ms-from-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(fromParts.month)}" />
+            <input id="ms-from-year" class="input" type="number" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
           </div>
           <div class="flex gap-3 mt-1.5">
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-              <input type="radio" name="ms-from-era" value="ac" checked class="accent-accent" /> AC
+              <input type="radio" name="ms-from-era" value="ac" ${fromParts.era !== "bc" ? "checked" : ""} class="accent-accent" /> AC
             </label>
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-              <input type="radio" name="ms-from-era" value="bc" class="accent-accent" /> BC
+              <input type="radio" name="ms-from-era" value="bc" ${fromParts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
             </label>
           </div>
         </div>
         <div>
           <p class="text-xs font-medium text-ink-muted mb-1">To <span class="font-normal text-ink-faint">(optional)</span></p>
           <div class="grid grid-cols-3 gap-2">
-            <input id="ms-to-day" class="input" type="number" min="1" max="31" placeholder="Day" />
-            <input id="ms-to-month" class="input" type="number" min="1" max="12" placeholder="Month" />
-            <input id="ms-to-year" class="input" type="number" placeholder="Year" />
+            <input id="ms-to-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(toParts.day)}" />
+            <input id="ms-to-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(toParts.month)}" />
+            <input id="ms-to-year" class="input" type="number" placeholder="Year" value="${escapeHtml(toParts.year)}" />
           </div>
           <div class="flex gap-3 mt-1.5">
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-              <input type="radio" name="ms-to-era" value="ac" checked class="accent-accent" /> AC
+              <input type="radio" name="ms-to-era" value="ac" ${toParts.era !== "bc" ? "checked" : ""} class="accent-accent" /> AC
             </label>
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-              <input type="radio" name="ms-to-era" value="bc" class="accent-accent" /> BC
+              <input type="radio" name="ms-to-era" value="bc" ${toParts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
             </label>
           </div>
         </div>
       </div>
       <div class="flex justify-end gap-2 pt-1">
         <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
-        <button type="submit" class="btn-primary px-5 py-2.5">Add moment</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">${isEdit ? "Save moment" : "Add moment"}</button>
       </div>
     </form>
   `;
@@ -3363,28 +3511,40 @@ export async function openAddMilestone(parentEvent, { onSaved } = {}) {
         return;
       }
     }
+    const summary = document.getElementById("ms-summary")?.value.trim() || null;
     try {
-      const saved = await api.createEntity({
-        type: "milestone",
-        title,
-        summary: document.getElementById("ms-summary")?.value.trim() || null,
-        body: null,
-        date_start,
-        date_end,
-        parent_id: parentEvent.id,
-        tags: [],
-        attachments: [],
-        period_ids: [],
-        phase_ids: [],
-        country_ids: [],
-        figure_ids: [],
-        link_ids: [],
-      });
-      toast(`Added moment “${saved.title}”`);
+      let saved;
+      if (isEdit) {
+        saved = await api.updateEntity(milestone.id, {
+          title,
+          summary,
+          date_start,
+          date_end,
+        });
+        toast(`Updated “${saved.title}”`);
+      } else {
+        saved = await api.createEntity({
+          type: "milestone",
+          title,
+          summary,
+          body: null,
+          date_start,
+          date_end,
+          parent_id: parent.id,
+          tags: [],
+          attachments: [],
+          period_ids: [],
+          phase_ids: [],
+          country_ids: [],
+          figure_ids: [],
+          link_ids: [],
+        });
+        toast(`Added moment “${saved.title}”`);
+      }
       closeModal();
       if (onSaved) onSaved(saved);
     } catch (err) {
-      toast(err.message || "Could not create moment");
+      toast(err.message || `Could not ${isEdit ? "save" : "create"} moment`);
     }
   });
 }

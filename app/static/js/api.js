@@ -118,6 +118,39 @@ export const api = {
     return request(`/timeline${s ? `?${s}` : ""}`);
   },
   createTopic: (body) => request("/topics", { method: "POST", body: JSON.stringify(body) }),
+  reorderTopicMembers: async (topicId, body) => {
+    const payload = JSON.stringify(body);
+    const paths = [
+      `/topics/${topicId}/member-order`,
+      `/entities/${topicId}/topic-member-order`,
+    ];
+    for (const path of paths) {
+      try {
+        return await request(path, { method: "PATCH", body: payload });
+      } catch (err) {
+        const msg = String(err.message || "").toLowerCase();
+        if (msg.includes("not found")) continue;
+        throw err;
+      }
+    }
+    const links = await request(`/links?entity_id=${encodeURIComponent(topicId)}`);
+    const byMember = new Map();
+    for (const link of links || []) {
+      if (link.relation !== "part_of") continue;
+      if (link.source_id === topicId) byMember.set(link.target_id, link);
+      else if (link.target_id === topicId) byMember.set(link.source_id, link);
+    }
+    for (let idx = 0; idx < (body.ordered_entity_ids || []).length; idx++) {
+      const eid = body.ordered_entity_ids[idx];
+      const link = byMember.get(eid);
+      if (!link) throw new Error(`Not a member of this topic: ${eid}`);
+      await request(`/links/${link.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sort_order: idx }),
+      });
+    }
+    return { ok: true, fallback: true };
+  },
   upload: async (file) => {
     const fd = new FormData();
     fd.append("file", file);

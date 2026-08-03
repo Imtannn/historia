@@ -120,6 +120,11 @@ class TopicCreate(SQLModel):
     figure_ids: list[str] = Field(default_factory=list)
 
 
+class TopicMemberOrderUpdate(SQLModel):
+    kind: str = Field(min_length=1, max_length=32)
+    ordered_entity_ids: list[str] = Field(default_factory=list)
+
+
 # ---------- Link ----------
 
 
@@ -154,6 +159,7 @@ class LinkBase(SQLModel):
     relation: RelationType = RelationType.related_to
     # involves: preset roles; related_to (figure↔figure): free-text relationship label
     role: Optional[str] = Field(default=None, max_length=LINK_ROLE_MAX_LENGTH)
+    sort_order: int = Field(default=0)
 
 
 class Link(LinkBase, table=True):
@@ -167,6 +173,7 @@ class LinkCreate(LinkBase):
 
 class LinkUpdate(SQLModel):
     role: Optional[str] = None
+    sort_order: Optional[int] = None
 
 
 class LinkRead(LinkBase):

@@ -20,8 +20,10 @@ from app.models import (
     Link,
     RelationType,
     ReviewState,
+    TopicMemberOrderUpdate,
     utcnow,
 )
+from app.api.topics import apply_topic_member_order
 
 router = APIRouter(prefix="/entities", tags=["entities"])
 
@@ -512,6 +514,15 @@ def sync_country_places(session: Session = Depends(get_session)) -> dict:
     return {"ok": True, "synced_events": len(events), "synced_figures": len(figures)}
 
 
+@router.patch("/{entity_id}/topic-member-order", response_model=dict)
+def reorder_topic_members_via_entity(
+    entity_id: str,
+    payload: TopicMemberOrderUpdate,
+    session: Session = Depends(get_session),
+) -> dict:
+    return apply_topic_member_order(session, entity_id, payload)
+
+
 @router.patch("/{entity_id}", response_model=EntityRead)
 def update_entity(
     entity_id: str,
@@ -710,6 +721,7 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
         direction: str,
         link_id: str | None,
         role: str | None = None,
+        sort_order: int = 0,
     ) -> None:
         if other.id in seen_in_related or other.id == entity_id:
             return
@@ -722,19 +734,34 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
                 "direction": direction,
                 "link_id": link_id,
                 "role": role,
+                "sort_order": sort_order,
             }
         )
 
     for link in outgoing:
         other = load(link.target_id)
         if other:
-            add_related(other, link.relation, "out", link.id, getattr(link, "role", None))
+            add_related(
+                other,
+                link.relation,
+                "out",
+                link.id,
+                getattr(link, "role", None),
+                int(getattr(link, "sort_order", 0) or 0),
+            )
 
     # Incoming links also populate hub groups (e.g. country → its events)
     for link in incoming:
         other = load(link.source_id)
         if other:
-            add_related(other, link.relation, "in", link.id, getattr(link, "role", None))
+            add_related(
+                other,
+                link.relation,
+                "in",
+                link.id,
+                getattr(link, "role", None),
+                int(getattr(link, "sort_order", 0) or 0),
+            )
 
     # Children via parent_id
     children = session.exec(select(Entity).where(Entity.parent_id == entity_id)).all()
@@ -773,6 +800,15 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
                 item["entity"].title.lower(),
             )
         )
+
+    if entity.type == EntityType.topic:
+        for bucket, items in related.items():
+            items.sort(
+                key=lambda item: (
+                    item.get("sort_order", 0),
+                    item["entity"].title.lower(),
+                )
+            )
 
     return {
         "entity": _entity_read(entity),

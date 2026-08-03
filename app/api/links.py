@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from app.api.roles import ROLE_LINK_RELATIONS, http_normalize_role
 from app.db import get_session
-from app.models import Entity, Link, LinkCreate, LinkRead, LinkUpdate
+from app.models import Entity, EntityType, Link, LinkCreate, LinkRead, LinkUpdate, RelationType
 
 router = APIRouter(prefix="/links", tags=["links"])
 
@@ -58,6 +58,26 @@ def create_link(payload: LinkCreate, session: Session = Depends(get_session)) ->
         relation=payload.relation,
         role=role,
     )
+    source = session.get(Entity, payload.source_id)
+    target = session.get(Entity, payload.target_id)
+    if (
+        source
+        and target
+        and source.type == EntityType.topic
+        and payload.relation == RelationType.part_of
+    ):
+        existing = session.exec(
+            select(Link).where(
+                Link.source_id == payload.source_id,
+                Link.relation == RelationType.part_of,
+            )
+        ).all()
+        max_order = -1
+        for row in existing:
+            member = session.get(Entity, row.target_id)
+            if member and member.type == target.type:
+                max_order = max(max_order, int(getattr(row, "sort_order", 0) or 0))
+        link.sort_order = max_order + 1
     if payload.id:
         link.id = payload.id
     session.add(link)
@@ -79,6 +99,11 @@ def update_link(
         if link.relation not in ROLE_LINK_RELATIONS and payload.role:
             raise HTTPException(400, "Roles are only for involves or related_to links")
         link.role = http_normalize_role(payload.role, link.relation)
+        session.add(link)
+        session.commit()
+        session.refresh(link)
+    if payload.sort_order is not None:
+        link.sort_order = payload.sort_order
         session.add(link)
         session.commit()
         session.refresh(link)

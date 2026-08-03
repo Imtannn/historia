@@ -44,8 +44,8 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "app": "historia",
-            "version": 2,
-            "features": {"classifications": True},
+            "version": 3,
+            "features": {"classifications": True, "topic_reorder": True},
         }
 
     from app.api import router as api_router

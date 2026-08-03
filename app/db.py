@@ -51,6 +51,7 @@ _ENTITY_EXTRA_COLUMNS = {
 
 _LINK_EXTRA_COLUMNS = {
     "role": "ALTER TABLE link ADD COLUMN role VARCHAR(32)",
+    "sort_order": "ALTER TABLE link ADD COLUMN sort_order INTEGER DEFAULT 0",
 }
 
 _PROGRESS_EXTRA_COLUMNS = {
