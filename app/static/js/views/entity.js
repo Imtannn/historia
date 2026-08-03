@@ -1157,7 +1157,18 @@ export async function renderEntity(root, { params }) {
   }
 
   document.getElementById("entity-delete")?.addEventListener("click", async () => {
-    if (!confirm(`Delete “${e.title}”? This removes its links too.`)) return;
+    let confirmMsg = `Delete “${e.title}”? This removes its links too.`;
+    if (e.type === "place") {
+      const eventCount = (data.related?.event || []).length;
+      const figureCount = (data.related?.figure || []).length;
+      const parts = [];
+      if (eventCount) parts.push(`${eventCount} event${eventCount === 1 ? "" : "s"}`);
+      if (figureCount) parts.push(`${figureCount} figure${figureCount === 1 ? "" : "s"}`);
+      if (parts.length) {
+        confirmMsg = `Delete “${e.title}”? It will be removed from ${parts.join(" and ")}.`;
+      }
+    }
+    if (!confirm(confirmMsg)) return;
     try {
       await api.deleteEntity(e.id);
       toast("Deleted");

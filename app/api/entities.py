@@ -130,6 +130,39 @@ def _sync_figure_country_link(session: Session, figure: Entity) -> None:
     _replace_place_links(session, figure.id, place_ids, RelationType.involves)
 
 
+def _strip_country_references(session: Session, place: Entity) -> None:
+    """Remove a country from event/figure text fields so sync won't recreate the place."""
+    name = (place.title or "").strip()
+    if not name:
+        return
+    key = name.lower()
+
+    linked_event_ids: set[str] = set()
+    for link in session.exec(
+        select(Link).where(Link.target_id == place.id)
+    ).all():
+        if link.relation not in (RelationType.occurred_in, RelationType.involves):
+            continue
+        src = session.get(Entity, link.source_id)
+        if src and src.type == EntityType.event:
+            linked_event_ids.add(src.id)
+
+    for event in session.exec(select(Entity).where(Entity.type == EntityType.event)).all():
+        names = _normalize_country_names(event.country_names, event.country_name)
+        filtered = [n for n in names if n.lower() != key]
+        if len(filtered) == len(names) and event.id not in linked_event_ids:
+            continue
+        event.country_names = filtered
+        event.country_name = ", ".join(filtered) if filtered else None
+        session.add(event)
+
+    for figure in session.exec(select(Entity).where(Entity.type == EntityType.figure)).all():
+        if (figure.place_name or "").strip().lower() != key:
+            continue
+        figure.place_name = None
+        session.add(figure)
+
+
 def _signed_year(value: Optional[str]) -> Optional[int]:
     parsed = parse_historia_date(value)
     return parsed[0] if parsed else None
@@ -676,6 +709,9 @@ def delete_entity(entity_id: str, session: Session = Depends(get_session)) -> No
     entity = session.get(Entity, entity_id)
     if not entity:
         raise HTTPException(404, "Entity not found")
+
+    if entity.type == EntityType.place:
+        _strip_country_references(session, entity)
 
     # Remove links involving this entity
     links = session.exec(
