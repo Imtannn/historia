@@ -2,7 +2,7 @@
 
 import { api } from "../api.js";
 import { escapeHtml, entityMatches, formatDate, formatRange, formatCountryNames, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel, isImageUrl } from "../util.js";
-import { openAddPhase, openAddTopic, openAddFigure } from "../modal.js";
+import { openAddPhase, openAddTopic, openAddFigure, openAddCountry } from "../modal.js";
 
 const HUB_TABS = {
   periods: {
@@ -18,7 +18,7 @@ const HUB_TABS = {
   countries: {
     type: "place",
     title: "Countries",
-    empty: "No countries yet. Pick one when adding an event.",
+    empty: "No countries yet. Add one here, or type a country when adding an event.",
   },
   figures: {
     type: "figure",
@@ -55,6 +55,50 @@ function countryOptionLabel(place, flagMap) {
     flagMap[place.title.toLowerCase()] ||
     "";
   return flag ? `${flag} ${place.title}` : place.title;
+}
+
+async function clientSyncCountryPlaces() {
+  const [events, figures, places] = await Promise.all([
+    api.listEntities({ type: "event" }),
+    api.listEntities({ type: "figure" }),
+    api.listEntities({ type: "place" }),
+  ]);
+  const known = new Set(places.map((p) => p.title.toLowerCase()));
+  const names = new Set();
+  for (const event of events) {
+    for (const name of formatCountryNames(event)) {
+      if (name) names.add(name);
+    }
+  }
+  for (const figure of figures) {
+    if (figure.place_name?.trim()) names.add(figure.place_name.trim());
+  }
+  let catalogData = { countries: [], empires: [] };
+  try {
+    catalogData = await api.catalog();
+  } catch {
+    /* ignore */
+  }
+  const flagMap = {};
+  for (const c of catalogData.countries || []) flagMap[c.name.toLowerCase()] = c.flag;
+  for (const e of catalogData.empires || []) flagMap[e.name.toLowerCase()] = e.flag;
+
+  for (const name of names) {
+    if (known.has(name.toLowerCase())) continue;
+    const flag = flagMap[name.toLowerCase()] || null;
+    await api.createEntity({
+      type: "place",
+      title: name,
+      summary: flag,
+      tags: [],
+      attachments: [],
+      period_ids: [],
+      country_ids: [],
+      figure_ids: [],
+      link_ids: [],
+    });
+    known.add(name.toLowerCase());
+  }
 }
 
 export async function renderLibrary(root, { query = {} } = {}) {
@@ -293,6 +337,18 @@ export async function renderLibrary(root, { query = {} } = {}) {
 
 async function renderHubTab(root, { tab, filterQ = "" } = {}) {
   const cfg = HUB_TABS[tab];
+  const isCountries = tab === "countries";
+  if (isCountries) {
+    try {
+      await api.syncCountryPlaces();
+    } catch {
+      try {
+        await clientSyncCountryPlaces();
+      } catch {
+        /* list places only */
+      }
+    }
+  }
   let items = await api.listEntities({ type: cfg.type });
   if (filterQ) items = items.filter((e) => entityMatches(e, filterQ));
 
@@ -328,7 +384,9 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
         ? `${items.length} · tick to group into a topic, or open one`
         : isTopics
           ? `${items.length} · named groups of events and phases`
-          : `${items.length} · open one to see its events`;
+          : isCountries
+            ? `${items.length} · open one to see its events and figures`
+            : `${items.length} · open one to see its events`;
 
   root.innerHTML = `
     <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6">
@@ -347,7 +405,9 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
                 ? `<button type="button" id="hub-add-phase" class="btn-secondary text-sm px-4 py-2">Add phase</button>`
                 : isTopics
                   ? `<button type="button" id="hub-add-topic" class="btn-secondary text-sm px-4 py-2">Create topic</button>`
-                  : ""
+                  : isCountries
+                    ? `<button type="button" id="hub-add-country" class="btn-secondary text-sm px-4 py-2">Add country</button>`
+                    : ""
       }
     </div>
     <input id="hub-q" class="input mb-4" placeholder="Search…" value="${escapeHtml(filterQ)}" />
@@ -373,7 +433,9 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
                     ? `<button type="button" id="hub-add-phase-empty" class="btn-primary text-sm px-4 py-2">Add phase</button>`
                     : isTopics
                       ? `<button type="button" id="hub-add-topic-empty" class="btn-primary text-sm px-4 py-2">Create topic</button>`
-                      : ""
+                      : isCountries
+                        ? `<button type="button" id="hub-add-country-empty" class="btn-primary text-sm px-4 py-2">Add country</button>`
+                        : ""
             }
           </div>`
         : `<div class="space-y-2">
@@ -428,6 +490,20 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
   };
   document.getElementById("hub-add-figure")?.addEventListener("click", openLibraryAddFigure);
   document.getElementById("hub-add-figure-empty")?.addEventListener("click", openLibraryAddFigure);
+
+  const openLibraryAddCountry = () => {
+    openAddCountry({
+      onSaved: (place) => {
+        if (place?.id) location.hash = `/entity/${place.id}`;
+        else location.hash = "/library?tab=countries";
+      },
+    }).catch((err) => {
+      console.error(err);
+      toast(err.message || "Could not open Add country");
+    });
+  };
+  document.getElementById("hub-add-country")?.addEventListener("click", openLibraryAddCountry);
+  document.getElementById("hub-add-country-empty")?.addEventListener("click", openLibraryAddCountry);
 
   async function createPeriod({ title, summary, date_start, date_end }) {
     const name = String(title || "").trim();

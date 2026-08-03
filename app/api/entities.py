@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.api.roles import http_normalize_role
 from app.dates import date_sort_key, parse_historia_date
 from app.db import get_session
+from app.catalog import COUNTRIES, EMPIRES
 from app.models import (
     Entity,
     EntityCreate,
@@ -46,6 +47,85 @@ def _normalize_country_names(
     if not names and (country_name or "").strip():
         names = [country_name.strip()]
     return names
+
+
+def _flag_for_country_name(name: str) -> Optional[str]:
+    key = name.strip().lower()
+    for country_name, flag in COUNTRIES:
+        if country_name.lower() == key:
+            return flag
+    for empire_name, flag, _ in EMPIRES:
+        if empire_name.lower() == key:
+            return flag
+    return None
+
+
+def _find_place_by_title(session: Session, name: str) -> Optional[Entity]:
+    key = name.strip().lower()
+    if not key:
+        return None
+    for place in session.exec(select(Entity).where(Entity.type == EntityType.place)).all():
+        if place.title.strip().lower() == key:
+            return place
+    return None
+
+
+def _ensure_place(session: Session, name: str) -> Entity:
+    cleaned = name.strip()
+    if not cleaned:
+        raise HTTPException(400, "Country name cannot be empty")
+    existing = _find_place_by_title(session, cleaned)
+    if existing:
+        return existing
+    flag = _flag_for_country_name(cleaned)
+    place = Entity(
+        type=EntityType.place,
+        title=cleaned,
+        summary=flag,
+        tags=[],
+        attachments=[],
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    session.add(place)
+    session.flush()
+    if session.get(ReviewState, place.id) is None:
+        session.add(ReviewState(entity_id=place.id))
+    return place
+
+
+def _replace_place_links(
+    session: Session,
+    source_id: str,
+    place_ids: list[str],
+    relation: RelationType,
+) -> None:
+    old = session.exec(
+        select(Link).where(Link.source_id == source_id, Link.relation == relation)
+    ).all()
+    for link in old:
+        target = session.get(Entity, link.target_id)
+        if target and target.type == EntityType.place:
+            session.delete(link)
+    session.flush()
+    if place_ids:
+        _add_typed_links(session, source_id, place_ids, EntityType.place, relation)
+
+
+def _sync_event_country_links(session: Session, event: Entity) -> None:
+    if event.type != EntityType.event:
+        return
+    names = _normalize_country_names(event.country_names, event.country_name)
+    place_ids = [_ensure_place(session, name).id for name in names]
+    _replace_place_links(session, event.id, place_ids, RelationType.occurred_in)
+
+
+def _sync_figure_country_link(session: Session, figure: Entity) -> None:
+    if figure.type != EntityType.figure:
+        return
+    place_name = (figure.place_name or "").strip()
+    place_ids = [_ensure_place(session, place_name).id] if place_name else []
+    _replace_place_links(session, figure.id, place_ids, RelationType.involves)
 
 
 def _signed_year(value: Optional[str]) -> Optional[int]:
@@ -408,9 +488,28 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
     if entity.type == EntityType.period:
         _sync_overlapping_phases_for_period(session, entity)
 
+    if entity.type == EntityType.event:
+        _sync_event_country_links(session, entity)
+    elif entity.type == EntityType.figure and (entity.place_name or "").strip():
+        _sync_figure_country_link(session, entity)
+
     session.commit()
     session.refresh(entity)
     return _entity_read(entity)
+
+
+@router.post("/sync-country-places")
+def sync_country_places(session: Session = Depends(get_session)) -> dict:
+    """Ensure place entities exist for all free-text country names on events and figures."""
+    events = session.exec(select(Entity).where(Entity.type == EntityType.event)).all()
+    figures = session.exec(select(Entity).where(Entity.type == EntityType.figure)).all()
+    for event in events:
+        _sync_event_country_links(session, event)
+    for figure in figures:
+        if (figure.place_name or "").strip():
+            _sync_figure_country_link(session, figure)
+    session.commit()
+    return {"ok": True, "synced_events": len(events), "synced_figures": len(figures)}
 
 
 @router.patch("/{entity_id}", response_model=EntityRead)
@@ -527,6 +626,13 @@ def update_entity(
 
     if entity.type == EntityType.period:
         _sync_overlapping_phases_for_period(session, entity)
+
+    if entity.type == EntityType.event:
+        _sync_event_country_links(session, entity)
+    elif entity.type == EntityType.figure and (
+        payload.place_name is not None or (entity.place_name or "").strip()
+    ):
+        _sync_figure_country_link(session, entity)
 
     session.commit()
     session.refresh(entity)

@@ -1168,6 +1168,51 @@ async function setPrimaryPlace(name, flagHint = "") {
   return primaryPlace();
 }
 
+/** Resolve free-text country names to place entity IDs (create places when missing). */
+async function ensurePlacesForNames(names) {
+  const cleaned = [...new Set(names.map((n) => String(n || "").trim()).filter(Boolean))];
+  if (!cleaned.length) return [];
+
+  if (!catalog.countries?.length && !catalog.empires?.length) {
+    try {
+      const cat = await api.catalog();
+      catalog.countries = cat.countries || [];
+      catalog.empires = cat.empires || [];
+    } catch {
+      /* flags optional */
+    }
+  }
+
+  let places = hubs.country?.length ? hubs.country : await api.listEntities({ type: "place" });
+  const ids = [];
+
+  for (const name of cleaned) {
+    let place = places.find((p) => p.title.toLowerCase() === name.toLowerCase());
+    if (!place) {
+      const flag = flagForCountry(name);
+      place = await api.createEntity({
+        type: "place",
+        title: name,
+        summary: flag || null,
+        tags: [],
+        attachments: [],
+        period_ids: [],
+        country_ids: [],
+        figure_ids: [],
+        link_ids: [],
+      });
+      places.push(place);
+      if (hubs.country) {
+        hubs.country.push(place);
+        hubs.country.sort((a, b) => a.title.localeCompare(b.title));
+      }
+    }
+    ids.push(place.id);
+  }
+
+  return ids;
+}
+
 async function ensureEmpire(name, flagHint = "") {
   const existing = hubs.country.find((e) => e.title.toLowerCase() === name.toLowerCase());
   if (existing) {
@@ -2196,6 +2241,13 @@ export async function openQuickAdd({
     }
 
     const countryNames = [...eventCountries];
+    let countryIds = [];
+    try {
+      countryIds = await ensurePlacesForNames(countryNames);
+    } catch (err) {
+      toast(err.message || "Could not save countries");
+      return;
+    }
     const body = {
       title: document.getElementById("qa-title").value.trim(),
       summary: document.getElementById("qa-note").value.trim() || null,
@@ -2210,7 +2262,7 @@ export async function openQuickAdd({
       attachments: [...attachments],
       period_ids: [...selectedBelong.period.keys()],
       phase_ids: [...selectedBelong.phase.keys()],
-      country_ids: [],
+      country_ids: countryIds,
       figure_ids: [...selectedBelong.figure.keys()],
       figure_roles: {},
       link_ids: [...selectedRelated.keys()],
@@ -2402,6 +2454,8 @@ export async function openAddFigure({ onSaved } = {}) {
   bindMediaHandlers();
   bindFigureFormSubmit("fig-add-form", async (payload) => {
     try {
+      const countryName = payload.place_name || "";
+      const countryIds = countryName ? await ensurePlacesForNames([countryName]) : [];
       const saved = await api.createEntity({
         type: "figure",
         ...payload,
@@ -2410,7 +2464,7 @@ export async function openAddFigure({ onSaved } = {}) {
         parent_id: null,
         tags: [],
         period_ids: [],
-        country_ids: [],
+        country_ids: countryIds,
         figure_ids: [],
         link_ids: [],
       });
@@ -2630,6 +2684,8 @@ export async function openEditFigure(figure, { onSaved } = {}) {
     }
 
     try {
+      const countryName = document.getElementById("fig-country")?.value.trim() || null;
+      const countryIds = countryName ? await ensurePlacesForNames([countryName]) : [];
       const saved = await api.updateEntity(figure.id, {
         title,
         summary: document.getElementById("fig-summary").value.trim() || null,
@@ -2638,10 +2694,10 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         date_end: dates.date_end,
         reign_start: dates.reign_start,
         reign_end: dates.reign_end,
-        place_name: document.getElementById("fig-country")?.value.trim() || null,
+        place_name: countryName,
         category: document.getElementById("entity-category")?.value.trim() || null,
         attachments: [...attachments],
-        country_ids: [],
+        country_ids: countryIds,
         figure_ids,
         figure_roles,
       });
@@ -2745,6 +2801,163 @@ export async function openEditPeriod(period, { onSaved } = {}) {
         summary: document.getElementById("period-summary").value.trim() || null,
         date_start,
         date_end,
+      });
+      toast(`Updated “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not save");
+    }
+  });
+}
+
+function countryFlagFromSummary(summary) {
+  const s = String(summary || "").trim();
+  if (!s || s.includes(" ")) return "";
+  return s;
+}
+
+/** Add a country / territory hub (name + optional flag emoji). */
+export async function openAddCountry({ onSaved } = {}) {
+  let catalogData = { countries: [], empires: [] };
+  try {
+    catalogData = await api.catalog();
+  } catch {
+    /* ignore */
+  }
+  const panel = document.getElementById("modal-panel");
+  if (!panel) {
+    toast("Could not open form");
+    return;
+  }
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Add country</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Name it and optionally add a flag emoji.</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="country-form" class="space-y-4">
+      <div>
+        <label class="label" for="country-title">Name</label>
+        <input id="country-title" class="input text-lg" required maxlength="500" placeholder="e.g. Rome, France, Frankish Empire" autofocus autocomplete="off" />
+      </div>
+      <div>
+        <label class="label" for="country-flag">Flag <span class="font-normal text-ink-faint">(optional)</span></label>
+        <p class="text-xs text-ink-faint -mt-1">Paste an emoji — e.g. 🇫🇷 🏛️ 🌍. Known names auto-fill when saved.</p>
+        <input id="country-flag" class="input" maxlength="20" placeholder="🇫🇷" autocomplete="off" />
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Create country</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  const titleInput = document.getElementById("country-title");
+  const flagInput = document.getElementById("country-flag");
+  titleInput?.addEventListener("blur", () => {
+    if (flagInput?.value.trim()) return;
+    const name = titleInput.value.trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    const hit =
+      catalogData.countries?.find((c) => c.name.toLowerCase() === key) ||
+      catalogData.empires?.find((e) => e.name.toLowerCase() === key);
+    if (hit?.flag) flagInput.value = hit.flag;
+  });
+  document.getElementById("country-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = titleInput?.value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    let flag = flagInput?.value.trim() || "";
+    if (!flag) {
+      const key = title.toLowerCase();
+      const hit =
+        catalogData.countries?.find((c) => c.name.toLowerCase() === key) ||
+        catalogData.empires?.find((e) => e.name.toLowerCase() === key);
+      flag = hit?.flag || "";
+    }
+    try {
+      const saved = await api.createEntity({
+        type: "place",
+        title,
+        summary: flag || null,
+        body: null,
+        parent_id: null,
+        tags: [],
+        attachments: [],
+        period_ids: [],
+        country_ids: [],
+        figure_ids: [],
+        link_ids: [],
+      });
+      toast(`Created “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not create country");
+    }
+  });
+}
+
+/** Edit country name and flag emoji. */
+export async function openEditCountry(place, { onSaved } = {}) {
+  let catalogData = { countries: [], empires: [] };
+  try {
+    catalogData = await api.catalog();
+  } catch {
+    /* ignore */
+  }
+  const flagValue = countryFlagFromSummary(place.summary);
+  const panel = document.getElementById("modal-panel");
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Edit country</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Update the name or flag shown in the Countries list.</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="country-form" class="space-y-4">
+      <div>
+        <label class="label" for="country-title">Name</label>
+        <input id="country-title" class="input text-lg" required maxlength="500" value="${escapeHtml(place.title)}" />
+      </div>
+      <div>
+        <label class="label" for="country-flag">Flag <span class="font-normal text-ink-faint">(optional)</span></label>
+        <input id="country-flag" class="input" maxlength="20" placeholder="🇫🇷" value="${escapeHtml(flagValue)}" autocomplete="off" />
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Save country</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  document.getElementById("country-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("country-title")?.value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    let flag = document.getElementById("country-flag")?.value.trim() || "";
+    if (!flag) {
+      const key = title.toLowerCase();
+      const hit =
+        catalogData.countries?.find((c) => c.name.toLowerCase() === key) ||
+        catalogData.empires?.find((e) => e.name.toLowerCase() === key);
+      flag = hit?.flag || "";
+    }
+    try {
+      const saved = await api.updateEntity(place.id, {
+        title,
+        summary: flag || null,
       });
       toast(`Updated “${saved.title}”`);
       closeModal();

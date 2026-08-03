@@ -12,7 +12,7 @@ import {
   toast,
   compareByDateThenTitle,
 } from "../util.js";
-import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openAddPhase, openAddMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
+import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openEditCountry, openAddPhase, openAddMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
 
 const GROUP_ORDER = ["event", "phase", "period", "place", "figure", "topic", "milestone", "timeline"];
 const GROUP_TITLES = {
@@ -395,6 +395,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
   const isTopic = e.type === "topic";
   const isPeriod = e.type === "period";
   const isPhase = e.type === "phase";
+  const isPlace = e.type === "place";
   const backHref = isTopic
     ? "#/library?tab=topics"
     : isPeriod
@@ -468,6 +469,11 @@ function renderGenericHub(root, data, e, bodyHtml) {
           isPhase
             ? `<button type="button" id="phase-edit" class="btn-secondary text-sm px-3 py-1.5">Edit phase</button>
                <button type="button" id="phase-add-event" class="btn-primary text-sm px-3 py-1.5">Add event</button>`
+            : ""
+        }
+        ${
+          isPlace
+            ? `<button type="button" id="country-edit" class="btn-secondary text-sm px-3 py-1.5">Edit country</button>`
             : ""
         }
         <button type="button" id="entity-delete" class="btn-ghost text-sm text-red-700 hover:bg-red-50">Delete</button>
@@ -907,6 +913,15 @@ export async function renderEntity(root, { params }) {
 
   document.getElementById("phase-edit")?.addEventListener("click", () => {
     openEditPhase(e, {
+      onSaved: () => {
+        location.hash = `/entity/${e.id}`;
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      },
+    });
+  });
+
+  document.getElementById("country-edit")?.addEventListener("click", () => {
+    openEditCountry(e, {
       onSaved: () => {
         location.hash = `/entity/${e.id}`;
         window.dispatchEvent(new HashChangeEvent("hashchange"));

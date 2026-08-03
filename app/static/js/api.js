@@ -53,6 +53,7 @@ export const api = {
   neighbors: (id) => request(`/entities/${id}/neighbors`),
   createEntity: (body) => request("/entities", { method: "POST", body: JSON.stringify(body) }),
   updateEntity: (id, body) => request(`/entities/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  syncCountryPlaces: () => request("/entities/sync-country-places", { method: "POST" }),
   deleteEntity: (id) => request(`/entities/${id}`, { method: "DELETE" }),
   listLinks: (entityId) => request(`/links${entityId ? `?entity_id=${entityId}` : ""}`),
   createLink: (body) => request("/links", { method: "POST", body: JSON.stringify(body) }),

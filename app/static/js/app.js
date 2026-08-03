@@ -70,6 +70,12 @@ route("/settings", ({ root }) => renderSettings(root));
 bindShell();
 refreshHeader();
 
+api.health().then((h) => {
+  if (h?.version == null || h.version < 2) {
+    toast("Server needs restart — run: npm run restart", 8000);
+  }
+}).catch(() => {});
+
 startRouter(async ({ path, query, params, matched }) => {
   const root = view();
   teardownTimeline(root);
