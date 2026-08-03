@@ -31,7 +31,18 @@ def _entity_read(e: Entity) -> EntityRead:
         data["tags"] = []
     if data.get("attachments") is None:
         data["attachments"] = []
+    if data.get("country_names") is None:
+        data["country_names"] = []
     return EntityRead.model_validate(data)
+
+
+def _progress_read(progress: Progress) -> ProgressRead:
+    data = progress.model_dump()
+    if data.get("categories") is None:
+        data["categories"] = []
+    validated = ProgressRead.model_validate(data)
+    validated.goal_hit_today = progress.xp_today >= progress.daily_goal_xp
+    return validated
 
 
 def _dump(session: Session) -> ExportPayload:
@@ -45,7 +56,7 @@ def _dump(session: Session) -> ExportPayload:
         entities=entities,
         links=links,
         review_states=reviews,
-        progress=ProgressRead.model_validate(progress),
+        progress=_progress_read(progress),
     )
 
 

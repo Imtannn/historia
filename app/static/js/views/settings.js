@@ -1,7 +1,7 @@
 /** Settings — daily goal, export/import/wipe, sample seed. */
 
 import { api } from "../api.js";
-import { toast } from "../util.js";
+import { toast, escapeHtml } from "../util.js";
 import { syncProgressChrome } from "../progress-ui.js";
 
 export async function renderSettings(root) {
@@ -13,6 +13,17 @@ export async function renderSettings(root) {
       <h1 class="font-display text-3xl tracking-tight">Settings</h1>
       <p class="text-ink-muted mt-1">Goals, backups, and sample data. JSON export is your safety net.</p>
     </div>
+
+    <section class="rounded-2xl bg-white border border-paper-line p-6 shadow-soft mb-6 max-w-xl">
+      <h2 class="font-display text-xl mb-1">Classifications</h2>
+      <p class="text-sm text-ink-muted mb-4">Define your own filter options (e.g. War, Politics, Culture). Use them when adding events or figures.</p>
+      <div class="flex gap-2 mb-3">
+        <input id="cat-input" class="input flex-1" placeholder="New classification…" maxlength="64" />
+        <button type="button" id="cat-add" class="btn-secondary px-3">Add</button>
+      </div>
+      <div id="cat-list" class="flex flex-wrap gap-2 min-h-[1.5rem]"></div>
+      <p id="cat-sync-note" class="hidden text-xs text-ink-faint mt-2"></p>
+    </section>
 
     <section class="rounded-2xl bg-white border border-paper-line p-6 shadow-soft mb-6 max-w-xl">
       <h2 class="font-display text-xl mb-1">Daily goal</h2>
@@ -61,6 +72,82 @@ export async function renderSettings(root) {
       <button type="button" id="btn-wipe" class="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold hover:bg-red-800">Wipe all data</button>
     </section>
   `;
+
+  let categories = await api.getUserCategories();
+
+  function syncNote(synced) {
+    const el = document.getElementById("cat-sync-note");
+    if (!el) return;
+    if (synced) {
+      el.classList.add("hidden");
+      el.textContent = "";
+      return;
+    }
+    el.classList.remove("hidden");
+    el.textContent = "Saved on this device. Run npm run restart to sync to the server.";
+  }
+
+  async function persistCategories(next) {
+    const result = await api.saveUserCategories(next);
+    categories = [...result.categories];
+    syncNote(result.synced);
+    return result;
+  }
+
+  function renderCategories() {
+    const box = document.getElementById("cat-list");
+    if (!box) return;
+    if (!categories.length) {
+      box.innerHTML = `<span class="text-sm text-ink-faint">No classifications yet.</span>`;
+      return;
+    }
+    box.innerHTML = categories
+      .map(
+        (c, i) => `
+      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-paper-deep text-sm">
+        ${escapeHtml(c)}
+        <button type="button" data-rm-cat="${i}" class="text-ink-faint hover:text-red-700" aria-label="Remove">×</button>
+      </span>`
+      )
+      .join("");
+    box.querySelectorAll("[data-rm-cat]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const next = categories.filter((_, i) => i !== parseInt(btn.dataset.rmCat, 10));
+        try {
+          await persistCategories(next);
+          renderCategories();
+          toast("Classification removed");
+        } catch (err) {
+          toast(err.message);
+        }
+      });
+    });
+  }
+  renderCategories();
+
+  document.getElementById("cat-add")?.addEventListener("click", async () => {
+    const val = document.getElementById("cat-input")?.value.trim();
+    if (!val) return;
+    if (categories.some((c) => c.toLowerCase() === val.toLowerCase())) {
+      toast("Already exists");
+      return;
+    }
+    const next = [...categories, val];
+    try {
+      await persistCategories(next);
+      document.getElementById("cat-input").value = "";
+      renderCategories();
+      toast("Classification added");
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  document.getElementById("cat-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("cat-add")?.click();
+    }
+  });
 
   document.getElementById("goal-form").addEventListener("submit", async (e) => {
     e.preventDefault();

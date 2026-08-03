@@ -48,10 +48,15 @@ class EntityBase(SQLModel):
     body: Optional[str] = Field(default=None, sa_column=Column(Text))
     date_start: Optional[str] = Field(default=None, max_length=32)  # ISO date or year, e.g. -0044
     date_end: Optional[str] = Field(default=None, max_length=32)
+    reign_start: Optional[str] = Field(default=None, max_length=32)
+    reign_end: Optional[str] = Field(default=None, max_length=32)
     parent_id: Optional[str] = Field(default=None, foreign_key="entity.id", index=True)
     tags: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     place_name: Optional[str] = Field(default=None, max_length=500)
     place_url: Optional[str] = Field(default=None, max_length=2000)
+    country_name: Optional[str] = Field(default=None, max_length=500)
+    country_names: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    category: Optional[str] = Field(default=None, max_length=64)
     attachments: list[str] = Field(default_factory=list, sa_column=Column(JSON))
 
 
@@ -81,10 +86,15 @@ class EntityUpdate(SQLModel):
     body: Optional[str] = None
     date_start: Optional[str] = None
     date_end: Optional[str] = None
+    reign_start: Optional[str] = None
+    reign_end: Optional[str] = None
     parent_id: Optional[str] = None
     tags: Optional[list[str]] = None
     place_name: Optional[str] = None
     place_url: Optional[str] = None
+    country_name: Optional[str] = None
+    country_names: Optional[list[str]] = None
+    category: Optional[str] = None
     attachments: Optional[list[str]] = None
     # When set on an event, replace belonging / related links
     period_ids: Optional[list[str]] = None
@@ -200,6 +210,7 @@ class ProgressBase(SQLModel):
     last_active_date: Optional[date] = None
     daily_goal_xp: int = 30
     xp_today: int = 0
+    categories: list[str] = Field(default_factory=list, sa_column=Column(JSON))
 
 
 class Progress(ProgressBase, table=True):
@@ -213,6 +224,7 @@ class ProgressRead(ProgressBase):
 
 class ProgressUpdate(SQLModel):
     daily_goal_xp: Optional[int] = Field(default=None, ge=1, le=1000)
+    categories: Optional[list[str]] = None
 
 
 # ---------- Export / Import ----------

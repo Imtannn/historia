@@ -13,9 +13,12 @@ router = APIRouter(tags=["progress"])
 
 
 def _progress_read(progress) -> ProgressRead:
-    data = ProgressRead.model_validate(progress)
-    data.goal_hit_today = progress.xp_today >= progress.daily_goal_xp
-    return data
+    data = progress.model_dump()
+    if data.get("categories") is None:
+        data["categories"] = []
+    validated = ProgressRead.model_validate(data)
+    validated.goal_hit_today = progress.xp_today >= progress.daily_goal_xp
+    return validated
 
 
 @router.get("/progress", response_model=ProgressRead)
@@ -36,6 +39,8 @@ def update_progress(
     progress = ensure_progress(session)
     if payload.daily_goal_xp is not None:
         progress.daily_goal_xp = payload.daily_goal_xp
+    if payload.categories is not None:
+        progress.categories = [str(c).strip() for c in payload.categories if str(c).strip()]
     session.add(progress)
     session.commit()
     session.refresh(progress)

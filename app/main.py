@@ -41,7 +41,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "app": "historia"}
+        return {
+            "status": "ok",
+            "app": "historia",
+            "version": 2,
+            "features": {"classifications": True},
+        }
 
     from app.api import router as api_router
 

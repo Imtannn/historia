@@ -1,8 +1,8 @@
 /** Event board — sorted events, filters, multi-select → group into topic. */
 
 import { api } from "../api.js";
-import { escapeHtml, entityMatches, formatDate, formatRange, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel } from "../util.js";
-import { openAddPhase, openAddTopic } from "../modal.js";
+import { escapeHtml, entityMatches, formatDate, formatRange, formatCountryNames, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel, isImageUrl } from "../util.js";
+import { openAddPhase, openAddTopic, openAddFigure } from "../modal.js";
 
 const HUB_TABS = {
   periods: {
@@ -31,6 +31,10 @@ const HUB_TABS = {
     empty: "No topics yet. Create one, or select events/phases and group them.",
   },
 };
+
+function entityImageUrls(entity) {
+  return (entity.attachments || []).filter((u) => isImageUrl(u));
+}
 
 async function eventIdsForHub(hubId) {
   if (!hubId) return null;
@@ -61,18 +65,31 @@ export async function renderLibrary(root, { query = {} } = {}) {
   const filterCountry = query.country || "";
   const filterFigure = query.figure || "";
 
+  const filterCategory = query.category || "";
+
+  if (tab === "gallery") {
+    await renderGalleryTab(root, {
+      filterQ,
+      filterType: query.type || "",
+      filterCategory: query.category || "",
+    });
+    return;
+  }
+
   if (HUB_TABS[tab]) {
     await renderHubTab(root, { tab, filterQ });
     return;
   }
 
-  const [entities, periods, places, figures, catalog] = await Promise.all([
+  const [entities, periods, places, figures, catalog, progress] = await Promise.all([
     api.listEntities({ type: "event" }),
     api.listEntities({ type: "period" }),
     api.listEntities({ type: "place" }),
     api.listEntities({ type: "figure" }),
     api.catalog().catch(() => ({ countries: [] })),
+    api.getProgress().catch(() => ({ categories: [] })),
   ]);
+  const categories = progress.categories || [];
 
   const flagMap = {};
   for (const c of catalog.countries || []) {
@@ -90,6 +107,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
 
   let filtered = entities;
   if (filterTag) filtered = filtered.filter((e) => (e.tags || []).includes(filterTag));
+  if (filterCategory) filtered = filtered.filter((e) => (e.category || "") === filterCategory);
   if (filterQ) filtered = filtered.filter((e) => entityMatches(e, filterQ));
   for (const idSet of hubIdSets) {
     if (idSet) filtered = filtered.filter((e) => idSet.has(e.id));
@@ -120,7 +138,13 @@ export async function renderLibrary(root, { query = {} } = {}) {
 
     <div class="flex flex-col gap-3 mb-4">
       <input id="lib-q" class="input w-full" placeholder="Search titles, notes, tags…" value="${escapeHtml(filterQ)}" />
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <select id="lib-category" class="select">
+          <option value="">All classifications</option>
+          ${categories
+            .map((c) => `<option value="${escapeHtml(c)}" ${c === filterCategory ? "selected" : ""}>${escapeHtml(c)}</option>`)
+            .join("")}
+        </select>
         <select id="lib-tag" class="select">
           <option value="">All tags</option>
           ${tags
@@ -176,6 +200,8 @@ export async function renderLibrary(root, { query = {} } = {}) {
                     <div class="flex items-center gap-2 flex-wrap">
                       <span class="font-medium truncate">${escapeHtml(e.title)}</span>
                       ${range ? `<span class="text-xs text-ink-faint tabular-nums">${escapeHtml(range)}</span>` : `<span class="text-xs text-ink-faint">Undated</span>`}
+                      ${formatCountryNames(e).length ? `<span class="text-xs text-ink-faint">${escapeHtml(formatCountryNames(e).join(", "))}</span>` : ""}
+                      ${e.category ? `<span class="type-badge">${escapeHtml(e.category)}</span>` : ""}
                     </div>
                     ${e.summary ? `<p class="text-sm text-ink-muted mt-0.5 line-clamp-1">${escapeHtml(e.summary)}</p>` : ""}
                     <div class="flex flex-wrap gap-2 mt-1">
@@ -197,8 +223,10 @@ export async function renderLibrary(root, { query = {} } = {}) {
     const period = document.getElementById("lib-period").value;
     const country = document.getElementById("lib-country").value;
     const figure = document.getElementById("lib-figure").value;
+    const category = document.getElementById("lib-category")?.value || "";
     const params = new URLSearchParams();
     if (q) params.set("q", q);
+    if (category) params.set("category", category);
     if (tag) params.set("tag", tag);
     if (period) params.set("period", period);
     if (country) params.set("country", country);
@@ -212,6 +240,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
     clearTimeout(debounce);
     debounce = setTimeout(pushFilters, 220);
   });
+  document.getElementById("lib-category")?.addEventListener("change", pushFilters);
   document.getElementById("lib-tag")?.addEventListener("change", pushFilters);
   document.getElementById("lib-period")?.addEventListener("change", pushFilters);
   document.getElementById("lib-country")?.addEventListener("change", pushFilters);
@@ -387,121 +416,18 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
     }
   `;
 
-  async function createFigure(title) {
-    const name = String(title || "").trim();
-    if (!name) {
-      toast("Enter a name");
-      return;
-    }
-    try {
-      const fig = await api.createEntity({
-        type: "figure",
-        title: name,
-        summary: null,
-        body: null,
-        date_start: null,
-        date_end: null,
-        parent_id: null,
-        tags: [],
-        attachments: [],
-        period_ids: [],
-        country_ids: [],
-        figure_ids: [],
-        link_ids: [],
-      });
-      toast(`Opened biography for “${fig.title}”`);
-      location.hash = `/entity/${fig.id}`;
-    } catch (err) {
-      toast(err.message || "Could not create figure");
-    }
-  }
-
-  function showAddFigureForm() {
-    const panel = document.getElementById("modal-panel");
-    const modal = document.getElementById("modal-root");
-    if (!panel || !modal) {
-      toast("Could not open form");
-      return;
-    }
-    panel.innerHTML = `
-      <div class="flex items-start justify-between mb-4">
-        <div>
-          <h2 class="font-display text-xl">Add figure</h2>
-          <p class="text-sm text-ink-muted mt-0.5">Your notebook first — catalog names are a shortcut to create.</p>
-        </div>
-        <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
-      </div>
-      <form id="add-figure-form" class="space-y-4">
-        <div>
-          <label class="label" for="add-figure-name">Name</label>
-          <input id="add-figure-name" class="input text-lg" required maxlength="500" placeholder="Type a name…" autofocus autocomplete="off" />
-          <div id="add-figure-suggest" class="mt-2 max-h-48 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30 hidden"></div>
-        </div>
-        <div class="flex justify-end gap-2 pt-1">
-          <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
-          <button type="submit" class="btn-primary px-5 py-2.5">Create biography</button>
-        </div>
-      </form>
-    `;
-    modal.classList.remove("hidden");
-
-    let catalogFigures = [];
-    api.catalog().then((c) => {
-      catalogFigures = c.figures || [];
-      renderSuggest();
-    }).catch(() => {});
-
-    const nameEl = document.getElementById("add-figure-name");
-    const suggestEl = document.getElementById("add-figure-suggest");
-
-    function renderSuggest() {
-      const q = (nameEl?.value || "").trim().toLowerCase();
-      if (!q || q.length < 1) {
-        suggestEl.classList.add("hidden");
-        suggestEl.innerHTML = "";
-        return;
-      }
-      const hits = catalogFigures
-        .filter((f) => f.name.toLowerCase().includes(q))
-        .slice(0, 10);
-      if (!hits.length) {
-        suggestEl.classList.add("hidden");
-        suggestEl.innerHTML = "";
-        return;
-      }
-      suggestEl.classList.remove("hidden");
-      suggestEl.innerHTML =
-        `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Catalog shortcut</p>` +
-        hits
-          .map(
-            (f) => `
-        <button type="button" data-suggest-name="${escapeHtml(f.name)}"
-          class="w-full text-left px-2 py-1.5 text-sm hover:bg-paper-deep rounded-lg">${escapeHtml(f.name)}</button>`
-          )
-          .join("");
-      suggestEl.querySelectorAll("[data-suggest-name]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          nameEl.value = btn.dataset.suggestName;
-          suggestEl.classList.add("hidden");
-          nameEl.focus();
-        });
-      });
-    }
-
-    nameEl?.addEventListener("input", renderSuggest);
-
-    document.getElementById("add-figure-form")?.addEventListener("submit", async (ev) => {
-      ev.preventDefault();
-      const name = document.getElementById("add-figure-name")?.value || "";
-      await createFigure(name);
-      modal.classList.add("hidden");
-      panel.innerHTML = "";
+  const openLibraryAddFigure = () => {
+    openAddFigure({
+      onSaved: (fig) => {
+        if (fig?.id) location.hash = `/entity/${fig.id}`;
+      },
+    }).catch((err) => {
+      console.error(err);
+      toast(err.message || "Could not open Add figure");
     });
-    queueMicrotask(() => nameEl?.focus());
-  }
-
-  document.getElementById("hub-add-figure")?.addEventListener("click", showAddFigureForm);
-  document.getElementById("hub-add-figure-empty")?.addEventListener("click", showAddFigureForm);
+  };
+  document.getElementById("hub-add-figure")?.addEventListener("click", openLibraryAddFigure);
+  document.getElementById("hub-add-figure-empty")?.addEventListener("click", openLibraryAddFigure);
 
   async function createPeriod({ title, summary, date_start, date_end }) {
     const name = String(title || "").trim();
@@ -686,5 +612,138 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
       if (q) params.set("q", q);
       location.hash = `/library?${params}`;
     }, 220);
+  });
+}
+
+async function renderGalleryTab(
+  root,
+  { filterQ = "", filterType = "", filterCategory = "" } = {}
+) {
+  const [all, categories] = await Promise.all([
+    api.listEntities(),
+    api.getUserCategories(),
+  ]);
+
+  let items = all
+    .map((e) => ({ entity: e, images: entityImageUrls(e) }))
+    .filter((x) => x.images.length > 0);
+
+  if (filterType === "event" || filterType === "figure") {
+    items = items.filter((x) => x.entity.type === filterType);
+  }
+  if (filterCategory) {
+    items = items.filter((x) => {
+      if (x.entity.type === "figure") return (x.entity.category || "") === filterCategory;
+      return x.entity.type === "event";
+    });
+  }
+  if (filterQ) {
+    items = items.filter((x) => entityMatches(x.entity, filterQ));
+  }
+  items.sort((a, b) => a.entity.title.localeCompare(b.entity.title));
+
+  const typeSummary =
+    filterType === "event" ? "events" : filterType === "figure" ? "figures" : "items";
+  const filterBits = [typeSummary];
+  if (filterCategory) filterBits.push(filterCategory);
+
+  function galleryHashParams() {
+    const params = new URLSearchParams({ tab: "gallery" });
+    const q = document.getElementById("gallery-q")?.value.trim();
+    const type = document.getElementById("gallery-type")?.value || "";
+    const category = document.getElementById("gallery-category")?.value || "";
+    if (q) params.set("q", q);
+    if (type) params.set("type", type);
+    if (category) params.set("category", category);
+    return params;
+  }
+
+  function navigateGallery() {
+    location.hash = `/library?${galleryHashParams()}`;
+  }
+
+  const showCategoryFilter = filterType !== "event";
+
+  root.innerHTML = `
+    <div class="mb-6">
+      <h1 class="font-display text-3xl tracking-tight">Gallery</h1>
+      <p class="text-ink-muted mt-1">${items.length} ${filterBits.join(" · ")} with media</p>
+    </div>
+
+    <div class="flex flex-col gap-3 mb-6 max-w-2xl">
+      <input id="gallery-q" class="input w-full" placeholder="Search gallery…" value="${escapeHtml(filterQ)}" />
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <select id="gallery-type" class="select">
+          <option value="" ${filterType === "" ? "selected" : ""}>All types</option>
+          <option value="event" ${filterType === "event" ? "selected" : ""}>Events only</option>
+          <option value="figure" ${filterType === "figure" ? "selected" : ""}>Figures only</option>
+        </select>
+        <select id="gallery-category" class="select" ${showCategoryFilter ? "" : "disabled"}>
+          <option value="">All classifications</option>
+          ${categories
+            .map(
+              (c) =>
+                `<option value="${escapeHtml(c)}" ${c === filterCategory ? "selected" : ""}>${escapeHtml(c)}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      ${
+        filterType === "event"
+          ? `<p class="text-xs text-ink-faint">Classification applies to figures — switch to Figures or All types to use it.</p>`
+          : ""
+      }
+    </div>
+
+    ${
+      items.length === 0
+        ? `<div class="rounded-2xl border border-dashed border-paper-line bg-white/50 p-10 text-center text-ink-muted">
+            <p class="font-display text-xl mb-2">No images yet</p>
+            <p class="text-sm">Add media when creating events or figures — paste an image or URL.</p>
+          </div>`
+        : `<div class="gallery-grid">
+            ${items
+              .map(({ entity: e, images }) => {
+                const thumb = images[0];
+                const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+                return `
+                <a href="#/entity/${e.id}" class="gallery-card no-underline text-inherit">
+                  <div class="gallery-thumb-wrap">
+                    <img src="${escapeHtml(thumb)}" alt="" class="gallery-thumb" loading="lazy" />
+                  </div>
+                  <div class="gallery-meta">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span class="type-badge">${typeLabel(e.type)}</span>
+                      ${e.category ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-paper-deep text-ink-muted">${escapeHtml(e.category)}</span>` : ""}
+                    </div>
+                    <p class="font-medium text-sm mt-1 line-clamp-2">${escapeHtml(e.title)}</p>
+                    ${range ? `<p class="text-xs text-ink-faint tabular-nums mt-0.5">${escapeHtml(range)}</p>` : ""}
+                  </div>
+                </a>`;
+              })
+              .join("")}
+          </div>`
+    }
+  `;
+
+  document.getElementById("gallery-type")?.addEventListener("change", () => {
+    const type = document.getElementById("gallery-type")?.value || "";
+    const catEl = document.getElementById("gallery-category");
+    if (catEl) {
+      if (type === "event") {
+        catEl.value = "";
+        catEl.disabled = true;
+      } else {
+        catEl.disabled = false;
+      }
+    }
+    navigateGallery();
+  });
+  document.getElementById("gallery-category")?.addEventListener("change", navigateGallery);
+
+  let debounce;
+  document.getElementById("gallery-q")?.addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(navigateGallery, 220);
   });
 }

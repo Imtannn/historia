@@ -6,6 +6,10 @@ import {
   escapeHtml,
   formatRange,
   formatSignedYear,
+  iconEvent,
+  iconFigure,
+  isImageUrl,
+  mediaPreviewHtml,
   normalizeTag,
   splitDateParts,
   storedToSignedYear,
@@ -97,6 +101,16 @@ function selectedEmpires() {
 
 function hasPlaceContext() {
   return selectedPlaces().length > 0;
+}
+
+/** Event needs at least one anchor: country, figure, period, or phase. */
+function hasEventAnchor(eventCountries) {
+  return (
+    (eventCountries?.length || 0) > 0 ||
+    selectedBelong.period.size > 0 ||
+    selectedBelong.phase.size > 0 ||
+    selectedBelong.figure.size > 0
+  );
 }
 
 /** Period overlaps the selected era (BC years are negative). Custom periods without range always match. */
@@ -384,7 +398,11 @@ function displayHubLabel(kind, entity) {
   return entity.title;
 }
 
+let mediaHandlersAbort = null;
+
 function closeModal() {
+  mediaHandlersAbort?.abort();
+  mediaHandlersAbort = null;
   document.getElementById("modal-root").classList.add("hidden");
   document.getElementById("modal-panel").innerHTML = "";
   selectedRelated = new Map();
@@ -401,44 +419,26 @@ function openModal() {
 function syncBelongHint() {
   const hint = document.getElementById("belong-hint");
   if (!hint) return;
-  if (!hasPlaceContext()) {
-    hint.textContent = "Required: pick a country or World on step 1.";
-    hint.className = "text-xs text-red-700 mt-0 mb-2";
-  } else {
-    const figCount = selectedBelong.figure.size;
-    const parts = [];
-    if (selectedBelong.period.size) {
-      const n = selectedBelong.period.size;
-      parts.push(`${n} period${n === 1 ? "" : "s"}`);
-    }
-    if (selectedBelong.phase.size) {
-      const n = selectedBelong.phase.size;
-      parts.push(`${n} phase${n === 1 ? "" : "s"}`);
-    }
-    if (selectedPlaces().length) parts.push("country");
-    if (figCount) parts.push(`${figCount} figure${figCount === 1 ? "" : "s"}`);
-    if (selectedEmpires().length) parts.push("empire");
-    hint.textContent = parts.length
-      ? `${parts.join(" · ")} linked`
-      : "Search to add periods and phases, or enter dates to auto-map.";
-    hint.className = "text-xs text-ink-faint mt-0 mb-2";
+  const figCount = selectedBelong.figure.size;
+  const parts = [];
+  if (selectedBelong.period.size) {
+    const n = selectedBelong.period.size;
+    parts.push(`${n} period${n === 1 ? "" : "s"}`);
   }
+  if (selectedBelong.phase.size) {
+    const n = selectedBelong.phase.size;
+    parts.push(`${n} phase${n === 1 ? "" : "s"}`);
+  }
+  if (figCount) parts.push(`${figCount} figure${figCount === 1 ? "" : "s"}`);
+  hint.textContent = parts.length
+    ? `${parts.join(" · ")} linked`
+    : "Enter dates to auto-map, or search to add periods and phases.";
+  hint.className = "text-xs text-ink-faint mt-0 mb-2";
   syncCascadeLock();
 }
 
 function syncCascadeLock() {
-  const unlocked = hasPlaceContext();
-  ["actor"].forEach((step) => {
-    const panel = document.getElementById(`belong-step-${step}`);
-    if (!panel) return;
-    panel.classList.toggle("opacity-50", !unlocked);
-    panel.querySelectorAll("input, button").forEach((el) => {
-      if (el.dataset.unlink || el.dataset.rmEmpire || el.dataset.rmFigure) return;
-      el.disabled = !unlocked;
-    });
-    const lock = document.getElementById(`belong-lock-${step}`);
-    if (lock) lock.classList.toggle("hidden", unlocked);
-  });
+  // Figures are independent of country — no cascade lock in the add-event wizard.
 }
 
 function chipHtml(label, attrs) {
@@ -1014,10 +1014,6 @@ function renderPhaseCatalog() {
 function renderActorCatalog() {
   const box = document.getElementById("belong-catalog-actor");
   if (!box) return;
-  if (!hasPlaceContext()) {
-    box.innerHTML = `<p class="text-xs text-ink-faint px-2 py-2">Pick a country or World first</p>`;
-    return;
-  }
   const qRaw = (document.getElementById("belong-search-actor")?.value || "").trim();
   const q = qRaw.toLowerCase();
   const selectedFigure = new Set([...selectedBelong.figure.values()].map((e) => e.title.toLowerCase()));
@@ -1347,10 +1343,6 @@ async function pickFromCatalog(kind, name, flag) {
       return;
     }
     if (kind === "figure") {
-      if (!hasPlaceContext()) {
-        toast("Pick a country or World first");
-        return;
-      }
       await ensureTyped("figure", name);
       const search = document.getElementById("belong-search-actor");
       if (search) search.value = "";
@@ -1428,15 +1420,16 @@ function renderAttachments() {
   const box = document.getElementById("file-list");
   if (!box) return;
   if (!attachments.length) {
-    box.innerHTML = `<span class="text-xs text-ink-faint">No file links yet</span>`;
+    box.innerHTML = `<span class="text-xs text-ink-faint">Paste an image or URL here — nothing added yet</span>`;
     return;
   }
   box.innerHTML = attachments
     .map(
       (url, i) => `
-      <div class="flex items-center gap-2 text-sm">
-        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline truncate flex-1">${escapeHtml(url)}</a>
-        <button type="button" data-rm-file="${i}" class="btn-ghost text-xs px-2 py-0.5">Remove</button>
+      <div class="flex items-center gap-3 text-sm py-1">
+        ${mediaPreviewHtml(url, { className: "h-14 w-14 object-cover rounded-lg border border-paper-line shrink-0" })}
+        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline truncate flex-1 min-w-0">${escapeHtml(isImageUrl(url) ? "Image" : url)}</a>
+        <button type="button" data-rm-file="${i}" class="btn-ghost text-xs px-2 py-0.5 shrink-0">Remove</button>
       </div>`
     )
     .join("");
@@ -1446,6 +1439,277 @@ function renderAttachments() {
       renderAttachments();
     });
   });
+}
+
+function mediaBlockHtml() {
+  return `
+    <div id="media-block" class="rounded-xl border border-dashed border-paper-line bg-paper-deep/20 p-3" tabindex="0">
+      <label class="label">Media</label>
+      <p class="text-xs text-ink-faint -mt-1 mb-2">Click here and paste an image (Cmd+V), drop a file, paste a URL, or browse.</p>
+      <div class="flex flex-wrap gap-2">
+        <input id="file-input" class="input flex-1 min-w-[12rem]" placeholder="Image URL…" />
+        <button type="button" id="file-add" class="btn-secondary px-3">Add URL</button>
+        <button type="button" id="file-browse" class="btn-secondary px-3">Browse…</button>
+        <input type="file" id="file-picker" accept="image/jpeg,image/png,image/gif,image/webp" class="hidden" />
+      </div>
+      <div id="file-list" class="mt-2 space-y-1"></div>
+    </div>`;
+}
+
+function extForMime(mime) {
+  const m = (mime || "").toLowerCase();
+  if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
+  if (m.includes("png")) return "png";
+  if (m.includes("gif")) return "gif";
+  if (m.includes("webp")) return "webp";
+  return "png";
+}
+
+function fileFromBlob(blob, mimeType = "") {
+  const type = blob.type || mimeType || "image/png";
+  if (blob instanceof File && blob.name && blob.type) return blob;
+  const ext = extForMime(type);
+  return new File([blob], `pasted-${Date.now()}.${ext}`, { type });
+}
+
+async function blobFromDataUrl(dataUrl) {
+  const res = await fetch(dataUrl);
+  return res.blob();
+}
+
+/** @returns {Promise<{ blob: Blob, type: string } | null>} */
+async function readClipboardImage(dataTransfer) {
+  if (!dataTransfer) return null;
+
+  for (const file of dataTransfer.files || []) {
+    if (file.type.startsWith("image/")) {
+      return { blob: file, type: file.type };
+    }
+  }
+
+  for (const item of dataTransfer.items || []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const blob = item.getAsFile();
+      if (blob) return { blob, type: item.type || blob.type || "image/png" };
+    }
+  }
+
+  const text = dataTransfer.getData("text/plain")?.trim();
+  if (text?.startsWith("data:image/")) {
+    try {
+      const blob = await blobFromDataUrl(text);
+      if (blob.type.startsWith("image/")) return { blob, type: blob.type };
+    } catch {
+      /* ignore bad data URL */
+    }
+  }
+
+  return null;
+}
+
+function bindMediaHandlers() {
+  mediaHandlersAbort?.abort();
+  mediaHandlersAbort = new AbortController();
+  const { signal } = mediaHandlersAbort;
+
+  async function addMediaUrl(url) {
+    const trimmed = String(url || "").trim();
+    if (!trimmed || attachments.includes(trimmed)) return;
+    attachments.push(trimmed);
+    renderAttachments();
+  }
+
+  let uploading = false;
+
+  async function addMediaBlob(blob, mimeType = "") {
+    if (uploading) return;
+    uploading = true;
+    try {
+      const file = fileFromBlob(blob, mimeType);
+      const { url, embedded } = await api.uploadOrEmbed(file);
+      await addMediaUrl(url);
+      toast(embedded ? "Image added (embedded)" : "Image added");
+    } catch (err) {
+      toast(err.message || "Could not add image");
+    } finally {
+      uploading = false;
+    }
+  }
+
+  async function handleClipboardPaste(e) {
+    if (e.defaultPrevented) return false;
+    const image = await readClipboardImage(e.clipboardData);
+    if (image) {
+      e.preventDefault();
+      await addMediaBlob(image.blob, image.type);
+      return true;
+    }
+    if (e.target?.id === "file-input") {
+      const text = e.clipboardData?.getData("text/plain")?.trim();
+      if (text && /^https?:\/\//i.test(text)) {
+        e.preventDefault();
+        await addMediaUrl(text);
+        const input = document.getElementById("file-input");
+        if (input) input.value = "";
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function addFile() {
+    const input = document.getElementById("file-input");
+    addMediaUrl(input?.value);
+    if (input) input.value = "";
+  }
+
+  document.getElementById("file-add")?.addEventListener("click", addFile, { signal });
+  document.getElementById("file-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addFile();
+    }
+  }, { signal });
+
+  document.getElementById("file-browse")?.addEventListener("click", () => {
+    document.getElementById("file-picker")?.click();
+  }, { signal });
+
+  document.getElementById("file-picker")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (file) await addMediaBlob(file, file.type);
+    e.target.value = "";
+  }, { signal });
+
+  const mediaBlock = document.getElementById("media-block");
+  mediaBlock?.addEventListener("dragover", (e) => {
+    if ([...e.dataTransfer?.types || []].includes("Files")) {
+      e.preventDefault();
+      mediaBlock.classList.add("border-accent", "bg-accent-soft/30");
+    }
+  }, { signal });
+
+  mediaBlock?.addEventListener("dragleave", () => {
+    mediaBlock.classList.remove("border-accent", "bg-accent-soft/30");
+  }, { signal });
+
+  mediaBlock?.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    mediaBlock.classList.remove("border-accent", "bg-accent-soft/30");
+    const file = [...e.dataTransfer?.files || []].find((f) => f.type.startsWith("image/"));
+    if (file) await addMediaBlob(file, file.type);
+  }, { signal });
+
+  // Paste works anywhere in the modal while it is open (not only when the URL field is focused).
+  document.getElementById("modal-panel")?.addEventListener("paste", (e) => {
+    void handleClipboardPaste(e);
+  }, { signal });
+}
+
+function categorySelectHtml(categories, selected = "", { error = "" } = {}) {
+  if (error) {
+    return `
+      <div>
+        <label class="label">Classification</label>
+        <p class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">${escapeHtml(error)}</p>
+        <input id="entity-category" type="hidden" value="${escapeHtml(selected)}" />
+      </div>`;
+  }
+  if (!categories?.length) {
+    return `
+      <div>
+        <label class="label">Classification</label>
+        <p class="text-xs text-ink-faint">Add options in Settings → Classifications, then reopen this form.</p>
+        <input id="entity-category" type="hidden" value="" />
+      </div>`;
+  }
+  return `
+    <div>
+      <label class="label" for="entity-category">Classification</label>
+      <select id="entity-category" class="select">
+        <option value="">— None —</option>
+        ${categories
+          .map(
+            (c) =>
+              `<option value="${escapeHtml(c)}" ${c === selected ? "selected" : ""}>${escapeHtml(c)}</option>`
+          )
+          .join("")}
+      </select>
+    </div>`;
+}
+
+async function loadUserCategories() {
+  const categories = await api.getUserCategories();
+  return { categories, error: "" };
+}
+
+function freeTextCountryHtml(id, value = "", { label = "Country / territory" } = {}) {
+  return `
+    <div>
+      <label class="label" for="${id}">${label} <span class="font-normal text-ink-faint">(optional)</span></label>
+      <p class="text-xs text-ink-faint -mt-1">Type any name — modern or historic.</p>
+      <input id="${id}" class="input" maxlength="500" placeholder="e.g. Wessex, Frankish Empire" value="${escapeHtml(value)}" autocomplete="off" />
+    </div>`;
+}
+
+function eventCountriesBlockHtml() {
+  return `
+    <div>
+      <label class="label" for="qa-country-input">Countries / territories</label>
+      <p class="text-xs text-ink-faint -mt-1">Add all involved — e.g. Germany, France, UK for World War I.</p>
+      <div class="flex gap-2">
+        <input id="qa-country-input" class="input flex-1" maxlength="500" placeholder="Type a country…" autocomplete="off" />
+        <button type="button" id="qa-country-add" class="btn-secondary px-3 shrink-0">Add</button>
+      </div>
+      <div id="qa-country-chips" class="flex flex-wrap gap-1.5 mt-2 min-h-[1.5rem]"></div>
+    </div>`;
+}
+
+function renderEventCountryChips(countries) {
+  const box = document.getElementById("qa-country-chips");
+  if (!box) return;
+  if (!countries.length) {
+    box.innerHTML = `<span class="text-xs text-ink-faint">No countries yet — add one above.</span>`;
+    return;
+  }
+  box.innerHTML = countries
+    .map(
+      (c, i) => `
+      <button type="button" data-rm-country="${i}" class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-paper-deep text-sm">
+        ${escapeHtml(c)}
+        <span aria-hidden="true">×</span>
+      </button>`
+    )
+    .join("");
+  box.querySelectorAll("[data-rm-country]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      countries.splice(parseInt(btn.dataset.rmCountry, 10), 1);
+      renderEventCountryChips(countries);
+    });
+  });
+}
+
+function bindEventCountryHandlers(countries) {
+  function addCountry() {
+    const input = document.getElementById("qa-country-input");
+    const val = input?.value.trim();
+    if (!val) return;
+    if (countries.some((c) => c.toLowerCase() === val.toLowerCase())) {
+      toast("Already added");
+      return;
+    }
+    countries.push(val);
+    if (input) input.value = "";
+    renderEventCountryChips(countries);
+  }
+  document.getElementById("qa-country-add")?.addEventListener("click", addCountry);
+  document.getElementById("qa-country-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addCountry();
+    }
+  });
+  renderEventCountryChips(countries);
 }
 
 function renderTagChips(tags) {
@@ -1520,7 +1784,7 @@ function belongStep(step, stepNum, label, placeholder, catalogHeight = "max-h-40
   const stepLabel = stepNum
     ? `<span class="text-ink-faint font-normal mr-1">${stepNum}.</span>${label}`
     : label;
-  const showLock = step !== "country" && step !== "period" && step !== "phase";
+  const showLock = false;
   const dateBlock = step === "period" && dateParts ? periodDateBlock(dateParts, dateEndParts) : "";
   return `
     <div id="belong-step-${step}" class="rounded-xl border border-paper-line p-3 bg-white space-y-3">
@@ -1553,15 +1817,24 @@ export async function openQuickAdd({
   let places;
   let figures;
   let catalogData = { countries: [], empires: [], figures: [] };
+  let userCategories = [];
+  let categoriesError = "";
   try {
-    [events, periods, phases, places, figures, catalogData] = await Promise.all([
-      api.listEntities({ type: "event" }),
-      api.listEntities({ type: "period" }),
-      api.listEntities({ type: "phase" }),
-      api.listEntities({ type: "place" }),
-      api.listEntities({ type: "figure" }),
+    const [lists, catalogResult, catResult] = await Promise.all([
+      Promise.all([
+        api.listEntities({ type: "event" }),
+        api.listEntities({ type: "period" }),
+        api.listEntities({ type: "phase" }),
+        api.listEntities({ type: "place" }),
+        api.listEntities({ type: "figure" }),
+      ]),
       api.catalog().catch(() => ({ countries: [], empires: [], figures: [] })),
+      loadUserCategories(),
     ]);
+    [events, periods, phases, places, figures] = lists;
+    catalogData = catalogResult;
+    userCategories = catResult.categories;
+    categoriesError = catResult.error;
   } catch (err) {
     toast(err.message || "Could not open Add event");
     throw err;
@@ -1579,6 +1852,14 @@ export async function openQuickAdd({
   pinnedPhaseIds = new Set();
   attachments = isEdit ? [...(editEntity.attachments || [])] : [];
   const tags = isEdit ? [...(editEntity.tags || [])] : [];
+  const eventCountries = [];
+  if (isEdit) {
+    if (editEntity.country_names?.length) {
+      eventCountries.push(...editEntity.country_names);
+    } else if (editEntity.country_name) {
+      eventCountries.push(editEntity.country_name);
+    }
+  }
 
   if (isEdit && neighbors) {
     const related = neighbors.related || {};
@@ -1591,9 +1872,11 @@ export async function openQuickAdd({
       pinnedPhaseIds.add(item.entity.id);
     }
     for (const item of related.place || []) {
-      selectedBelong.country.set(item.entity.id, item.entity);
+      const title = item.entity?.title;
+      if (title && !eventCountries.some((c) => c.toLowerCase() === title.toLowerCase())) {
+        eventCountries.push(title);
+      }
     }
-    normalizeToSingleCountry();
     for (const item of related.figure || []) {
       selectedBelong.figure.set(item.entity.id, item.entity);
     }
@@ -1662,7 +1945,7 @@ export async function openQuickAdd({
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">${isEdit ? "Edit event" : "Add event"}</h2>
+        <h2 class="font-display text-xl flex items-center gap-2">${iconEvent()} ${isEdit ? "Edit event" : "Add event"}</h2>
         <p id="wizard-sub" class="text-sm text-ink-muted mt-0.5">Step 1 of 2 — title, country &amp; figures${escapeHtml(contextNote)}</p>
       </div>
       <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
@@ -1679,12 +1962,10 @@ export async function openQuickAdd({
           <label class="label" for="qa-title">What happened?</label>
           <input id="qa-title" class="input text-lg" required maxlength="500" placeholder="e.g. Union of the Principalities" value="${escapeHtml(isEdit ? editEntity.title : "")}" autofocus />
         </div>
-        <div>
-          <p class="text-xs text-ink-faint mb-2">Country defaults to World. Pick a country to unlock its empires. Figures are optional.</p>
-          <div class="space-y-3">
-            ${belongStep("country", "", "Country / World", "Search countries…", "max-h-40")}
-            ${belongStep("actor", "", "Figures", "Search your figures, or type a name to add…", "max-h-48")}
-          </div>
+        ${eventCountriesBlockHtml()}
+        <div class="space-y-3">
+          ${belongStep("actor", "", "Figures involved", "Search your figures, or type a name to add…", "max-h-48")}
+          <p class="text-xs text-ink-faint -mt-1">Link people this event belongs to — e.g. a ruler, general, or key figure.</p>
         </div>
         <div class="flex justify-end gap-2 pt-1">
           <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
@@ -1723,6 +2004,8 @@ export async function openQuickAdd({
           <div id="tag-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
         </div>
 
+        ${categorySelectHtml(userCategories, isEdit ? editEntity.category || "" : "", { error: categoriesError })}
+
         <div>
           <label class="label">Map pin</label>
           <div class="space-y-2">
@@ -1731,14 +2014,7 @@ export async function openQuickAdd({
           </div>
         </div>
 
-        <div>
-          <label class="label">Files</label>
-          <div class="flex gap-2">
-            <input id="file-input" class="input flex-1" placeholder="Paste a URL or file path" />
-            <button type="button" id="file-add" class="btn-secondary px-3">Add</button>
-          </div>
-          <div id="file-list" class="mt-2 space-y-1"></div>
-        </div>
+        ${mediaBlockHtml()}
 
         <div class="flex justify-between gap-2 pt-1">
           <button type="button" id="wizard-back" class="btn-ghost">Back</button>
@@ -1789,27 +2065,14 @@ export async function openQuickAdd({
       document.getElementById("qa-title")?.focus();
       return;
     }
-    if (!hasPlaceContext()) {
-      toast("Pick a country or World first");
-      syncBelongHint();
-      return;
-    }
     showWizardStep(2);
   }
 
-  if (!isEdit) {
-    try {
-      await setPrimaryPlace("World", "🌍");
-    } catch (err) {
-      toast(err.message || "Could not set World");
-    }
-  }
-  ["country", "actor", "period", "phase"].forEach((step) => {
+  ["actor", "period", "phase"].forEach((step) => {
     const search = document.getElementById(`belong-search-${step}`);
     if (!search) return;
     search.addEventListener("input", () => {
-      if (step === "country") renderCountryCatalog();
-      else if (step === "actor") renderActorCatalog();
+      if (step === "actor") renderActorCatalog();
       else if (step === "period") renderPeriodCatalog();
       else renderPhaseCatalog();
     });
@@ -1826,9 +2089,11 @@ export async function openQuickAdd({
     });
   });
 
+  bindEventCountryHandlers(eventCountries);
   refreshBelongUI();
   renderRelatedChips();
   renderAttachments();
+  bindMediaHandlers();
   renderTagChips(tags);
   showWizardStep(1);
   openModal();
@@ -1866,21 +2131,6 @@ export async function openQuickAdd({
     }
   });
 
-  function addFile() {
-    const url = document.getElementById("file-input").value.trim();
-    if (!url) return;
-    if (!attachments.includes(url)) attachments.push(url);
-    document.getElementById("file-input").value = "";
-    renderAttachments();
-  }
-  document.getElementById("file-add").addEventListener("click", addFile);
-  document.getElementById("file-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addFile();
-    }
-  });
-
   document.getElementById("qa-from-year")?.addEventListener("change", () => {
     onEventDateFieldsChanged();
   });
@@ -1913,12 +2163,6 @@ export async function openQuickAdd({
       goToStep2();
       return;
     }
-    if (!hasPlaceContext()) {
-      toast("Pick a country or World first");
-      showWizardStep(1);
-      syncBelongHint();
-      return;
-    }
 
     const from = readEventDateSide("qa-from");
     const to = readEventDateSide("qa-to");
@@ -1943,6 +2187,15 @@ export async function openQuickAdd({
       autoAssignPeriodsFromEventDates();
     }
 
+    if (!hasEventAnchor(eventCountries)) {
+      toast("Add a country, figure, period, or phase");
+      if (!eventCountries.length && !selectedBelong.figure.size) {
+        showWizardStep(1);
+      }
+      return;
+    }
+
+    const countryNames = [...eventCountries];
     const body = {
       title: document.getElementById("qa-title").value.trim(),
       summary: document.getElementById("qa-note").value.trim() || null,
@@ -1951,10 +2204,13 @@ export async function openQuickAdd({
       tags: [...tags],
       place_name: document.getElementById("qa-place-name").value.trim() || null,
       place_url: document.getElementById("qa-place-url").value.trim() || null,
+      country_names: countryNames,
+      country_name: countryNames.length ? countryNames.join(", ") : null,
+      category: document.getElementById("entity-category")?.value.trim() || null,
       attachments: [...attachments],
       period_ids: [...selectedBelong.period.keys()],
       phase_ids: [...selectedBelong.phase.keys()],
-      country_ids: [...selectedBelong.country.keys()],
+      country_ids: [],
       figure_ids: [...selectedBelong.figure.keys()],
       figure_roles: {},
       link_ids: [...selectedRelated.keys()],
@@ -1996,35 +2252,219 @@ export async function openEditEvent(entityId, { onSaved } = {}) {
   });
 }
 
+/** Single optional date block (day / month / year + era). */
+function figureSingleDateHtml(prefix, label, parts) {
+  return `
+    <div>
+      <p class="text-xs font-medium text-ink-muted mb-1">${label}</p>
+      <div class="grid grid-cols-3 gap-2">
+        <input id="${prefix}-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(parts.day)}" />
+        <input id="${prefix}-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(parts.month)}" />
+        <input id="${prefix}-year" class="input" type="number" placeholder="Year" value="${escapeHtml(parts.year)}" />
+      </div>
+      <div class="flex gap-3 mt-1.5">
+        <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+          <input type="radio" name="${prefix}-era" value="ac" ${parts.era !== "bc" ? "checked" : ""} class="accent-accent" /> AC
+        </label>
+        <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+          <input type="radio" name="${prefix}-era" value="bc" ${parts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
+        </label>
+      </div>
+    </div>`;
+}
+
+function figureDatesFormHtml({ birth, death, reignFrom, reignTo }) {
+  return `
+    <div class="space-y-4">
+      <div>
+        <label class="label">Life dates <span class="font-normal text-ink-faint">(optional)</span></label>
+        <div class="grid sm:grid-cols-2 gap-3 mt-1">
+          ${figureSingleDateHtml("fig-birth", "Birth", birth)}
+          ${figureSingleDateHtml("fig-death", "Death", death)}
+        </div>
+      </div>
+      <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
+        <label class="label mb-0">Ruling period <span class="font-normal text-ink-faint">(optional)</span></label>
+        <p class="text-xs text-ink-faint -mt-1">Separate from birth and death — for kings, emperors, and other leaders.</p>
+        ${figureSingleDateHtml("fig-reign-from", "From", reignFrom)}
+        ${figureSingleDateHtml("fig-reign-to", "To", reignTo)}
+      </div>
+    </div>`;
+}
+
+function readFigureOptionalDate(prefix, label) {
+  const year = document.getElementById(`${prefix}-year`)?.value?.trim();
+  const month = document.getElementById(`${prefix}-month`)?.value;
+  const day = document.getElementById(`${prefix}-day`)?.value;
+  const era = document.querySelector(`input[name="${prefix}-era"]:checked`)?.value || "ac";
+  if ((month || day) && !year) {
+    return { error: `Add a year for ${label} if you set month or day` };
+  }
+  return { stored: composeDate(year || null, month, day, era) };
+}
+
+function readFigureFormDates() {
+  const birth = readFigureOptionalDate("fig-birth", "birth");
+  if (birth.error) return birth;
+  const death = readFigureOptionalDate("fig-death", "death");
+  if (death.error) return death;
+  const reignFrom = readFigureOptionalDate("fig-reign-from", "ruling start");
+  if (reignFrom.error) return reignFrom;
+  const reignTo = readFigureOptionalDate("fig-reign-to", "ruling end");
+  if (reignTo.error) return reignTo;
+  return {
+    date_start: birth.stored,
+    date_end: death.stored,
+    reign_start: reignFrom.stored,
+    reign_end: reignTo.stored,
+  };
+}
+
+function figureCountryFieldHtml(value = "") {
+  return `
+    <div>
+      <label class="label" for="fig-country">Country / territory <span class="font-normal text-ink-faint">(optional)</span></label>
+      <p class="text-xs text-ink-faint -mt-1">Type any name — modern or historic (e.g. Wessex, Frankish Empire).</p>
+      <input id="fig-country" class="input" maxlength="500" placeholder="e.g. Kingdom of Wessex" value="${escapeHtml(value)}" autocomplete="off" />
+    </div>`;
+}
+
+function bindFigureFormSubmit(formId, onSubmit) {
+  document.getElementById(formId)?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = document.getElementById("fig-title")?.value.trim();
+    if (!title) {
+      toast("Name is required");
+      return;
+    }
+    const dates = readFigureFormDates();
+    if (dates.error) {
+      toast(dates.error);
+      return;
+    }
+    await onSubmit({
+      title,
+      summary: document.getElementById("fig-summary")?.value.trim() || null,
+      body: document.getElementById("fig-body")?.value.trim() || null,
+      place_name: document.getElementById("fig-country")?.value.trim() || null,
+      ...dates,
+    });
+  });
+}
+
+/** Add figure with life dates, ruling period, and free-text country. */
+export async function openAddFigure({ onSaved } = {}) {
+  const panel = document.getElementById("modal-panel");
+  if (!panel) {
+    toast("Could not open form");
+    return;
+  }
+  let userCategories = [];
+  let categoriesError = "";
+  const catResult = await loadUserCategories();
+  userCategories = catResult.categories;
+  categoriesError = catResult.error;
+  attachments = [];
+  const empty = { year: "", month: "", day: "", era: "ac" };
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl flex items-center gap-2">${iconFigure()} Add figure</h2>
+        <p class="text-sm text-ink-muted mt-0.5">Name, life dates, ruling period, and country.</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="fig-add-form" class="space-y-5 max-h-[70vh] overflow-y-auto pr-1">
+      <div>
+        <label class="label" for="fig-title">Name</label>
+        <input id="fig-title" class="input text-lg" required maxlength="500" placeholder="e.g. Alfred the Great" autofocus autocomplete="off" />
+      </div>
+      <div>
+        <label class="label" for="fig-summary">Short bio <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="fig-summary" class="textarea" placeholder="One or two sentences…"></textarea>
+      </div>
+      <div>
+        <label class="label" for="fig-body">Full biography <span class="font-normal text-ink-faint">(optional)</span></label>
+        <textarea id="fig-body" class="textarea min-h-[80px]" placeholder="Longer notes (markdown)…"></textarea>
+      </div>
+      ${figureDatesFormHtml({ birth: empty, death: empty, reignFrom: empty, reignTo: empty })}
+      ${figureCountryFieldHtml()}
+      ${categorySelectHtml(userCategories, "", { error: categoriesError })}
+      ${mediaBlockHtml()}
+      <div class="flex justify-end gap-2 pt-2 sticky bottom-0 bg-white py-2">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn-primary px-5 py-2.5">Create biography</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  renderAttachments();
+  bindMediaHandlers();
+  bindFigureFormSubmit("fig-add-form", async (payload) => {
+    try {
+      const saved = await api.createEntity({
+        type: "figure",
+        ...payload,
+        category: document.getElementById("entity-category")?.value.trim() || null,
+        attachments: [...attachments],
+        parent_id: null,
+        tags: [],
+        period_ids: [],
+        country_ids: [],
+        figure_ids: [],
+        link_ids: [],
+      });
+      toast(`Opened biography for “${saved.title}”`);
+      closeModal();
+      if (onSaved) onSaved(saved);
+    } catch (err) {
+      toast(err.message || "Could not create figure");
+    }
+  });
+}
+
 /** Edit figure: bio, country, related people (+ relationship), topics. */
 export async function openEditFigure(figure, { onSaved } = {}) {
   const birth = splitDateParts(figure.date_start);
   const death = splitDateParts(figure.date_end);
+  const reignFrom = splitDateParts(figure.reign_start);
+  const reignTo = splitDateParts(figure.reign_end);
   const panel = document.getElementById("modal-panel");
   if (!panel || !figure?.id) return;
 
-  let places = [];
   let figures = [];
   let topics = [];
   let neighbors = { related: {} };
+  let userCategories = [];
+  let categoriesError = "";
   try {
-    [places, figures, topics, neighbors] = await Promise.all([
-      api.listEntities({ type: "place" }),
+    const [figList, topicList, nbrs, catResult] = await Promise.all([
       api.listEntities({ type: "figure" }),
       api.listEntities({ type: "topic" }),
       api.neighbors(figure.id),
+      loadUserCategories(),
     ]);
+    figures = figList;
+    topics = topicList;
+    neighbors = nbrs;
+    userCategories = catResult.categories;
+    categoriesError = catResult.error;
   } catch (err) {
     toast(err.message || "Could not load figure links");
     return;
   }
+  attachments = [...(figure.attachments || [])];
 
-  const selectedCountry = new Map();
-  let countryItems = neighborItems(neighbors, "place", { direction: "out", relation: "involves" });
-  if (!countryItems.length) {
-    countryItems = neighborItems(neighbors, "place", { relation: "involves" });
+  let countryName = figure.place_name || "";
+  if (!countryName) {
+    const linked = neighborItems(neighbors, "place", { direction: "out", relation: "involves" });
+    if (!linked.length) {
+      const alt = neighborItems(neighbors, "place", { relation: "involves" });
+      if (alt.length) countryName = alt[0].entity.title;
+    } else {
+      countryName = linked[0].entity.title;
+    }
   }
-  for (const item of countryItems) selectedCountry.set(item.entity.id, item.entity);
 
   const selectedPeople = new Map();
   for (const item of neighborItems(neighbors, "figure", { direction: "out", relation: "related_to" })) {
@@ -2041,7 +2481,6 @@ export async function openEditFigure(figure, { onSaved } = {}) {
     if (item.link_id) initialTopicLinkIds.set(item.entity.id, item.link_id);
   }
 
-  places = sortByTitle(places);
   figures = sortByTitle(figures.filter((f) => f.id !== figure.id));
   topics = sortByTitle(topics);
 
@@ -2050,7 +2489,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
       <div>
-        <h2 class="font-display text-xl">Edit figure</h2>
+        <h2 class="font-display text-xl flex items-center gap-2">${iconFigure()} Edit figure</h2>
         <p class="text-sm text-ink-muted mt-0.5">${escapeHtml(figure.title)}</p>
       </div>
       <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
@@ -2068,32 +2507,10 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         <label class="label" for="fig-body">Full biography</label>
         <textarea id="fig-body" class="textarea min-h-[100px]" placeholder="Longer notes (markdown)…">${escapeHtml(figure.body || "")}</textarea>
       </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="label">Birth</label>
-          <div class="flex gap-2 items-center">
-            <input id="fig-birth-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(birth.year)}" />
-            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-birth-era" value="ac" ${birth.era !== "bc" ? "checked" : ""} /> AC</label>
-            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-birth-era" value="bc" ${birth.era === "bc" ? "checked" : ""} /> BC</label>
-          </div>
-        </div>
-        <div>
-          <label class="label">Death</label>
-          <div class="flex gap-2 items-center">
-            <input id="fig-death-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(death.year)}" />
-            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-death-era" value="ac" ${death.era !== "bc" ? "checked" : ""} /> AC</label>
-            <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="fig-death-era" value="bc" ${death.era === "bc" ? "checked" : ""} /> BC</label>
-          </div>
-        </div>
-      </div>
-
-      <div class="border-t border-paper-line pt-4 space-y-2">
-        <label class="label">Country</label>
-        <p class="text-xs text-ink-faint -mt-1">Where this person is associated.</p>
-        <div id="fig-country-chips" class="flex flex-wrap gap-1.5 min-h-[1.5rem]"></div>
-        <input id="fig-country-q" class="input" placeholder="Search countries…" autocomplete="off" />
-        <div id="fig-country-list" class="max-h-36 overflow-y-auto rounded-lg border border-paper-line divide-y divide-paper-line"></div>
-      </div>
+      ${figureDatesFormHtml({ birth, death, reignFrom, reignTo })}
+      ${figureCountryFieldHtml(countryName)}
+      ${categorySelectHtml(userCategories, figure.category || "", { error: categoriesError })}
+      ${mediaBlockHtml()}
 
       <div class="border-t border-paper-line pt-4 space-y-2">
         <label class="label">Related people</label>
@@ -2118,6 +2535,8 @@ export async function openEditFigure(figure, { onSaved } = {}) {
     </form>
   `;
   openModal();
+  renderAttachments();
+  bindMediaHandlers();
 
   function renderPeopleChips() {
     const box = document.getElementById("fig-people-chips");
@@ -2151,26 +2570,6 @@ export async function openEditFigure(figure, { onSaved } = {}) {
       });
     });
   }
-
-  let renderCountryList = () => {};
-  const renderCountryChips = bindRemovableChips({
-    chipsId: "fig-country-chips",
-    selected: selectedCountry,
-    emptyHtml: emptyChip("No country selected."),
-    onChange: () => renderCountryList(),
-  });
-  renderCountryList = bindEntitySearchPicker({
-    listId: "fig-country-list",
-    searchId: "fig-country-q",
-    getCandidates: () => places,
-    isSelected: (id) => selectedCountry.has(id),
-    emptyNone: "No countries in library yet.",
-    onPick: (ent) => {
-      selectedCountry.set(ent.id, ent);
-      renderCountryChips();
-      renderCountryList();
-    },
-  });
 
   const renderPeopleList = bindEntitySearchPicker({
     listId: "fig-people-list",
@@ -2213,10 +2612,11 @@ export async function openEditFigure(figure, { onSaved } = {}) {
       toast("Name is required");
       return;
     }
-    const birthEra = document.querySelector('input[name="fig-birth-era"]:checked')?.value || "ac";
-    const deathEra = document.querySelector('input[name="fig-death-era"]:checked')?.value || "ac";
-    const birthYear = document.getElementById("fig-birth-year").value.trim();
-    const deathYear = document.getElementById("fig-death-year").value.trim();
+    const dates = readFigureFormDates();
+    if (dates.error) {
+      toast(dates.error);
+      return;
+    }
 
     document.querySelectorAll("[data-role-for]").forEach((input) => {
       const row = selectedPeople.get(input.dataset.roleFor);
@@ -2234,9 +2634,14 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         title,
         summary: document.getElementById("fig-summary").value.trim() || null,
         body: document.getElementById("fig-body").value.trim() || null,
-        date_start: composeDate(birthYear || null, null, null, birthEra),
-        date_end: composeDate(deathYear || null, null, null, deathEra),
-        country_ids: [...selectedCountry.keys()],
+        date_start: dates.date_start,
+        date_end: dates.date_end,
+        reign_start: dates.reign_start,
+        reign_end: dates.reign_end,
+        place_name: document.getElementById("fig-country")?.value.trim() || null,
+        category: document.getElementById("entity-category")?.value.trim() || null,
+        attachments: [...attachments],
+        country_ids: [],
         figure_ids,
         figure_roles,
       });

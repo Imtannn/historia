@@ -5,6 +5,8 @@ import {
   escapeHtml,
   formatDate,
   formatRange,
+  formatCountryNames,
+  isImageUrl,
   relationLabel,
   typeLabel,
   toast,
@@ -128,6 +130,64 @@ function lifeTimelineHtml(e, lifeEvents) {
     </section>`;
 }
 
+function mediaSectionHtml(attachments) {
+  if (!attachments?.length) return "";
+  return `
+    <section class="mb-8 rounded-2xl bg-white border border-paper-line p-5 shadow-soft">
+      <h2 class="text-xs uppercase tracking-wider text-ink-faint font-semibold mb-3">Media</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        ${attachments
+          .map((url) => {
+            if (isImageUrl(url)) {
+              return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="block rounded-xl overflow-hidden border border-paper-line hover:border-accent/40">
+                <img src="${escapeHtml(url)}" alt="" class="w-full aspect-square object-cover" loading="lazy" />
+              </a>`;
+            }
+            const isHttp = /^https?:\/\//i.test(url);
+            return `<div class="text-sm break-all p-2 rounded-lg bg-paper-deep">
+              ${isHttp ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline">${escapeHtml(url)}</a>` : escapeHtml(url)}
+            </div>`;
+          })
+          .join("")}
+      </div>
+    </section>`;
+}
+
+function duringTimeSectionHtml(items) {
+  if (!items?.length) return "";
+  const sorted = [...items].sort((a, b) =>
+    compareByDateThenTitle(a.entity, b.entity)
+  );
+  return `
+    <section class="mb-8">
+      <h2 class="font-display text-xl mb-1">Events during this time</h2>
+      <p class="text-sm text-ink-muted mb-3">All your other notes whose dates fall within this range — events, moments, figures, phases, and periods from anywhere in your library.</p>
+      <div class="space-y-2">
+        ${sorted
+          .map((item) => {
+            const ent = item.entity;
+            const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+            const fromParent = item.parent?.title
+              ? `<span class="text-xs text-ink-faint">from ${escapeHtml(item.parent.title)}</span>`
+              : "";
+            return `
+            <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-medium">${escapeHtml(ent.title)}</span>
+                  <span class="type-badge">${typeLabel(ent.type)}</span>
+                  ${r ? `<span class="text-xs text-ink-faint tabular-nums">${escapeHtml(r)}</span>` : ""}
+                  ${fromParent}
+                </div>
+                ${ent.summary ? `<p class="text-sm text-ink-muted mt-0.5 line-clamp-2">${escapeHtml(ent.summary)}</p>` : ""}
+              </div>
+            </a>`;
+          })
+          .join("")}
+      </div>
+    </section>`;
+}
+
 function milestonesSectionHtml(milestones) {
   const sorted = [...milestones].sort((a, b) =>
     compareByDateThenTitle(a.entity, b.entity)
@@ -187,6 +247,8 @@ function renderEventDetail(root, data, e, bodyHtml) {
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <span class="type-badge">${typeLabel(e.type)}</span>
         ${range ? `<span class="text-sm text-ink-faint tabular-nums">${escapeHtml(range)}</span>` : ""}
+        ${formatCountryNames(e).length ? `<span class="text-sm text-ink-faint">${escapeHtml(formatCountryNames(e).join(", "))}</span>` : ""}
+        ${e.category ? `<span class="type-badge">${escapeHtml(e.category)}</span>` : ""}
       </div>
       <h1 class="font-display text-3xl sm:text-4xl tracking-tight">${escapeHtml(e.title)}</h1>
       ${e.summary ? `<p class="text-lg text-ink-muted mt-3 max-w-2xl">${escapeHtml(e.summary)}</p>` : ""}
@@ -222,27 +284,7 @@ function renderEventDetail(root, data, e, bodyHtml) {
         : ""
     }
 
-    ${
-      attachments.length
-        ? `<section class="mb-8 rounded-2xl bg-white border border-paper-line p-5 shadow-soft">
-            <h2 class="text-xs uppercase tracking-wider text-ink-faint font-semibold mb-3">Files</h2>
-            <ul class="space-y-2">
-              ${attachments
-                .map((url) => {
-                  const isHttp = /^https?:\/\//i.test(url);
-                  return `<li>
-                    ${
-                      isHttp
-                        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline break-all text-sm">${escapeHtml(url)}</a>`
-                        : `<span class="text-sm break-all">${escapeHtml(url)}</span>`
-                    }
-                  </li>`;
-                })
-                .join("")}
-            </ul>
-          </section>`
-        : ""
-    }
+    ${mediaSectionHtml(attachments)}
 
     ${
       bodyHtml
@@ -254,6 +296,8 @@ function renderEventDetail(root, data, e, bodyHtml) {
     }
 
     ${milestonesSectionHtml(milestones)}
+
+    ${duringTimeSectionHtml(data.during_time)}
 
     ${
       phases.length
@@ -444,27 +488,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
         : ""
     }
 
-    ${
-      attachments.length
-        ? `<section class="mb-8 rounded-2xl bg-white border border-paper-line p-5 shadow-soft">
-            <h2 class="text-xs uppercase tracking-wider text-ink-faint font-semibold mb-3">Files</h2>
-            <ul class="space-y-2">
-              ${attachments
-                .map((url) => {
-                  const isHttp = /^https?:\/\//i.test(url);
-                  return `<li>
-                    ${
-                      isHttp
-                        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="text-accent hover:underline break-all text-sm">${escapeHtml(url)}</a>`
-                        : `<span class="text-sm break-all">${escapeHtml(url)}</span>`
-                    }
-                  </li>`;
-                })
-                .join("")}
-            </ul>
-          </section>`
-        : ""
-    }
+    ${mediaSectionHtml(attachments)}
 
     ${
       bodyHtml
@@ -592,6 +616,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
             </section>`
     }
 
+    ${duringTimeSectionHtml(data.during_time)}
+
     ${
       isPeriod || isPhase
         ? groups
@@ -650,11 +676,13 @@ function renderGenericHub(root, data, e, bodyHtml) {
 }
 
 function renderFigureBiography(root, data, e, bodyHtml) {
-  const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+  const lifeRange = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+  const reignRange = formatRange(e.reign_start, e.reign_end) || formatDate(e.reign_start);
   const lifeEvents = data.life_events || [];
   const related = { ...(data.related || {}) };
   // Events are shown in life story; hide duplicate event group
   delete related.event;
+  delete related.place;
   const otherGroups = groupList(related);
 
   root.innerHTML = `
@@ -665,9 +693,12 @@ function renderFigureBiography(root, data, e, bodyHtml) {
     <header class="mb-8">
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <span class="type-badge">Biography</span>
-        ${range ? `<span class="text-sm text-ink-faint tabular-nums">${escapeHtml(range)}</span>` : ""}
+        ${lifeRange ? `<span class="text-sm text-ink-faint tabular-nums">Life · ${escapeHtml(lifeRange)}</span>` : ""}
+        ${reignRange ? `<span class="text-sm text-ink-faint tabular-nums">Ruled · ${escapeHtml(reignRange)}</span>` : ""}
+        ${e.category ? `<span class="type-badge">${escapeHtml(e.category)}</span>` : ""}
       </div>
       <h1 class="font-display text-3xl sm:text-4xl tracking-tight">${escapeHtml(e.title)}</h1>
+      ${e.place_name ? `<p class="text-sm text-ink-muted mt-2">${escapeHtml(e.place_name)}</p>` : ""}
       ${e.summary ? `<p class="text-lg text-ink-muted mt-3 max-w-2xl">${escapeHtml(e.summary)}</p>` : `<p class="text-sm text-ink-faint mt-3">Add a short bio to introduce this figure.</p>`}
       ${
         (e.tags || []).length
@@ -695,7 +726,11 @@ function renderFigureBiography(root, data, e, bodyHtml) {
         : ""
     }
 
+    ${mediaSectionHtml(e.attachments || [])}
+
     ${lifeTimelineHtml(e, lifeEvents)}
+
+    ${duringTimeSectionHtml(data.during_time)}
 
     ${
       otherGroups.length

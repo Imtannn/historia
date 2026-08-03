@@ -20,6 +20,11 @@ def ensure_progress(session: Session) -> Progress:
         session.add(progress)
         session.commit()
         session.refresh(progress)
+    elif progress.categories is None:
+        progress.categories = []
+        session.add(progress)
+        session.commit()
+        session.refresh(progress)
     return progress
 
 

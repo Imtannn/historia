@@ -4,7 +4,9 @@
   "description": "Personal history notebook — FastAPI + vanilla JS (npm scripts wrap Python)",
   "scripts": {
     "setup": "node scripts/setup.mjs",
-    "dev": ".venv/bin/python run.py",
+    "dev": "node scripts/dev.mjs",
+    "stop": "node scripts/stop.mjs",
+    "restart": "node scripts/restart.mjs",
     "start": ".venv/bin/python run.py"
   },
   "engines": {

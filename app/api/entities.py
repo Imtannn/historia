@@ -31,7 +31,21 @@ def _entity_read(e: Entity) -> EntityRead:
         data["tags"] = []
     if data.get("attachments") is None:
         data["attachments"] = []
+    if data.get("country_names") is None:
+        data["country_names"] = []
+    if not data["country_names"] and data.get("country_name"):
+        data["country_names"] = [data["country_name"]]
     return EntityRead.model_validate(data)
+
+
+def _normalize_country_names(
+    country_names: Optional[list[str]] = None,
+    country_name: Optional[str] = None,
+) -> list[str]:
+    names = [str(c).strip() for c in (country_names or []) if str(c).strip()]
+    if not names and (country_name or "").strip():
+        names = [country_name.strip()]
+    return names
 
 
 def _signed_year(value: Optional[str]) -> Optional[int]:
@@ -51,10 +65,113 @@ def _year_range(entity: Entity) -> Optional[tuple[int, int]]:
     return (min(y0, y1), max(y0, y1))
 
 
+def _year_range_from_dates(
+    date_start: Optional[str],
+    date_end: Optional[str],
+) -> Optional[tuple[int, int]]:
+    y0 = _signed_year(date_start)
+    y1 = _signed_year(date_end)
+    if y0 is None and y1 is None:
+        return None
+    if y0 is None:
+        return (y1, y1)  # type: ignore[return-value]
+    if y1 is None:
+        return (y0, y0)
+    return (min(y0, y1), max(y0, y1))
+
+
+def _entity_time_ranges(entity: Entity) -> list[tuple[int, int]]:
+    """Life dates and reign dates (figures) as separate ranges for overlap checks."""
+    ranges: list[tuple[int, int]] = []
+    life = _year_range(entity)
+    if life is not None:
+        ranges.append(life)
+    if entity.type == EntityType.figure:
+        reign = _year_range_from_dates(entity.reign_start, entity.reign_end)
+        if reign is not None:
+            ranges.append(reign)
+    return ranges
+
+
+
 def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
     """True when ranges share interior years. Endpoint-only touch does not count
     (so Prehistory …3300 BC does not claim Bronze Age 3300 BC…)."""
     return a[0] < b[1] and a[1] > b[0]
+
+
+_DURING_TIME_TYPES = (
+    EntityType.event,
+    EntityType.milestone,
+    EntityType.figure,
+    EntityType.phase,
+    EntityType.period,
+)
+
+
+def _collect_during_time(
+    session: Session,
+    entity: Entity,
+    exclude_ids: Optional[set[str]] = None,
+) -> list[dict]:
+    """All dated notes from elsewhere whose timeline overlaps this entity's range."""
+    entity_ranges = _entity_time_ranges(entity)
+    if not entity_ranges:
+        return []
+
+    skip: set[str] = {entity.id}
+    if exclude_ids:
+        skip |= exclude_ids
+    for child in session.exec(select(Entity).where(Entity.parent_id == entity.id)).all():
+        skip.add(child.id)
+
+    candidates = list(
+        session.exec(
+            select(Entity).where(
+                Entity.type.in_(_DURING_TIME_TYPES)  # type: ignore[attr-defined]
+            )
+        ).all()
+    )
+
+    overlapping: list[Entity] = []
+    for other in candidates:
+        if other.id in skip:
+            continue
+        other_ranges = _entity_time_ranges(other) if other.type == EntityType.figure else []
+        if not other_ranges:
+            other_range = _year_range(other)
+            if other_range is not None:
+                other_ranges = [other_range]
+        if not other_ranges:
+            continue
+        if not any(
+            _ranges_overlap(er, orng) for er in entity_ranges for orng in other_ranges
+        ):
+            continue
+        overlapping.append(other)
+
+    milestone_parent_ids = {
+        m.parent_id for m in overlapping if m.type == EntityType.milestone and m.parent_id
+    }
+
+    results: list[dict] = []
+    for other in overlapping:
+        if other.type == EntityType.event and other.id in milestone_parent_ids:
+            continue
+        parent = None
+        if other.type == EntityType.milestone and other.parent_id:
+            p = session.get(Entity, other.parent_id)
+            if p:
+                parent = _entity_read(p)
+        results.append({"entity": _entity_read(other), "parent": parent})
+
+    results.sort(
+        key=lambda item: (
+            date_sort_key(item["entity"].date_start),
+            item["entity"].title.lower(),
+        )
+    )
+    return results
 
 
 def _sync_overlapping_phases_for_period(session: Session, period: Entity) -> None:
@@ -162,6 +279,7 @@ def _country_and_figure_relations(entity_type: EntityType) -> tuple[RelationType
 def list_entities(
     type: Optional[str] = Query(default=None),
     tag: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
     parent_id: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
@@ -177,6 +295,10 @@ def list_entities(
         tag_l = tag.lower()
         rows = [e for e in rows if any(t.lower() == tag_l for t in (e.tags or []))]
 
+    if category:
+        cat_l = category.lower()
+        rows = [e for e in rows if (e.category or "").lower() == cat_l]
+
     if q:
         ql = q.lower()
         rows = [
@@ -184,6 +306,10 @@ def list_entities(
             for e in rows
             if ql in e.title.lower()
             or (e.summary and ql in e.summary.lower())
+            or (e.country_name and ql in e.country_name.lower())
+            or any(ql in c.lower() for c in (e.country_names or []))
+            or (e.place_name and ql in e.place_name.lower())
+            or (e.category and ql in e.category.lower())
             or any(ql in t.lower() for t in (e.tags or []))
         ]
 
@@ -218,13 +344,23 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
     if data.get("attachments") is None:
         data["attachments"] = []
 
-    # Events must belong to at least one period, country, or figure
+    # Events need at least one anchor: period, phase, figure link, or country
     if payload.type == EntityType.event:
-        if not (payload.period_ids or payload.country_ids or payload.figure_ids):
+        country_names = _normalize_country_names(payload.country_names, payload.country_name)
+        if not (
+            payload.period_ids
+            or payload.phase_ids
+            or payload.country_ids
+            or payload.figure_ids
+            or country_names
+        ):
             raise HTTPException(
                 400,
-                "An event must belong to at least one period, country, or figure",
+                "An event needs a country, or at least one period, phase, or figure",
             )
+        if country_names:
+            data["country_names"] = country_names
+            data["country_name"] = ", ".join(country_names)
 
     entity = Entity(**data)
     if payload.id:
@@ -301,6 +437,10 @@ def update_entity(
     )
     for key, value in updates.items():
         setattr(entity, key, value)
+    if payload.country_names is not None or payload.country_name is not None:
+        names = _normalize_country_names(entity.country_names, entity.country_name)
+        entity.country_names = names
+        entity.country_name = ", ".join(names) if names else None
     entity.updated_at = utcnow()
     session.add(entity)
 
@@ -315,10 +455,11 @@ def update_entity(
             phase_ids = payload.phase_ids if payload.phase_ids is not None else []
             country_ids = payload.country_ids if payload.country_ids is not None else []
             figure_ids = payload.figure_ids if payload.figure_ids is not None else []
-            if not (period_ids or country_ids or figure_ids):
+            country_names = _normalize_country_names(entity.country_names, entity.country_name)
+            if not (period_ids or phase_ids or country_ids or figure_ids or country_names):
                 raise HTTPException(
                     400,
-                    "An event must belong to at least one period, country, or figure",
+                    "An event needs a country, or at least one period, phase, or figure",
                 )
             _replace_links_of_relations(
                 session,
@@ -533,4 +674,5 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
         "related": related,
         "backlinks": backlinks,
         "life_events": life_events,
+        "during_time": _collect_during_time(session, entity, seen_in_related),
     }

@@ -42,10 +42,19 @@ _ENTITY_EXTRA_COLUMNS = {
     "place_name": "ALTER TABLE entity ADD COLUMN place_name VARCHAR(500)",
     "place_url": "ALTER TABLE entity ADD COLUMN place_url VARCHAR(2000)",
     "attachments": "ALTER TABLE entity ADD COLUMN attachments JSON",
+    "reign_start": "ALTER TABLE entity ADD COLUMN reign_start VARCHAR(32)",
+    "reign_end": "ALTER TABLE entity ADD COLUMN reign_end VARCHAR(32)",
+    "country_name": "ALTER TABLE entity ADD COLUMN country_name VARCHAR(500)",
+    "country_names": "ALTER TABLE entity ADD COLUMN country_names JSON",
+    "category": "ALTER TABLE entity ADD COLUMN category VARCHAR(64)",
 }
 
 _LINK_EXTRA_COLUMNS = {
     "role": "ALTER TABLE link ADD COLUMN role VARCHAR(32)",
+}
+
+_PROGRESS_EXTRA_COLUMNS = {
+    "categories": "ALTER TABLE progress ADD COLUMN categories JSON",
 }
 
 
@@ -66,11 +75,15 @@ def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     _migrate_table_columns("entity", _ENTITY_EXTRA_COLUMNS)
     _migrate_table_columns("link", _LINK_EXTRA_COLUMNS)
+    _migrate_table_columns("progress", _PROGRESS_EXTRA_COLUMNS)
     with Session(engine) as session:
         existing = session.get(Progress, 1)
         if existing is None:
             session.add(Progress(id=1))
-            session.commit()
+        elif existing.categories is None:
+            existing.categories = []
+            session.add(existing)
+        session.commit()
 
 
 def get_session():

@@ -184,12 +184,47 @@ export function fuzzyScore(query, text) {
   return qi === q.length ? 1 : 0;
 }
 
+export function iconEvent(size = 20) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-accent shrink-0" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>`;
+}
+
+export function iconFigure(size = 20) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-accent shrink-0" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M5 20c0-4 3.5-7 7-7s7 3 7 7"/></svg>`;
+}
+
+export function isImageUrl(url) {
+  const s = String(url || "").trim().toLowerCase();
+  if (!s) return false;
+  if (s.startsWith("data:image/")) return true;
+  if (s.startsWith("/static/uploads/")) return true;
+  return /\.(jpe?g|png|gif|webp|avif)(\?|$)/i.test(s);
+}
+
+export function mediaPreviewHtml(url, { className = "h-16 w-16 object-cover rounded-lg border border-paper-line" } = {}) {
+  if (isImageUrl(url)) {
+    return `<img src="${escapeHtml(url)}" alt="" class="${className}" loading="lazy" />`;
+  }
+  return `<span class="text-xs text-accent truncate">${escapeHtml(url)}</span>`;
+}
+
+export function formatCountryNames(entity) {
+  const names = entity?.country_names?.length
+    ? entity.country_names
+    : entity?.country_name
+      ? [entity.country_name]
+      : [];
+  return names.filter(Boolean);
+}
+
 export function entityMatches(entity, query) {
   if (!query) return true;
   const hay = [
     entity.title,
     entity.summary || "",
     entity.place_name || "",
+    entity.country_name || "",
+    ...formatCountryNames(entity),
+    entity.category || "",
     ...(entity.tags || []),
   ].join(" ");
   return fuzzyScore(query, hay) > 0;

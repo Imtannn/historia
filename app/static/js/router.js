@@ -68,6 +68,7 @@ export function startRouter(onResolve) {
         phases: "phases",
         countries: "countries",
         figures: "figures",
+        gallery: "gallery",
       };
       const active = navMap[tab] || "library";
       document.querySelectorAll("[data-nav]").forEach((el) => {

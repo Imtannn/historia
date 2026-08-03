@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 historia.db
 .DS_Store
+app/static/uploads/*
+!app/static/uploads/.gitkeep
 *.egg-info/
 dist/
 build/
