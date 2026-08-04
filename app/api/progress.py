@@ -62,12 +62,7 @@ def dashboard(session: Session = Depends(get_session)) -> dict:
     reviews = {r.entity_id: r for r in session.exec(select(ReviewState)).all()}
 
     def read(e: Entity) -> EntityRead:
-        data = e.model_dump()
-        if data.get("tags") is None:
-            data["tags"] = []
-        if data.get("attachments") is None:
-            data["attachments"] = []
-        return EntityRead.model_validate(data)
+        return EntityRead.model_validate(e)
 
     recent = sorted(events, key=lambda e: e.created_at, reverse=True)[:6]
 

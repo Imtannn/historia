@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Optional
 
 from sqlalchemy import Column, JSON, Text
+from pydantic import field_validator
 from sqlmodel import Field, SQLModel
 
 
@@ -58,6 +59,12 @@ class EntityBase(SQLModel):
     country_names: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     category: Optional[str] = Field(default=None, max_length=64)
     attachments: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+    @field_validator("tags", "attachments", "country_names", mode="before")
+    @classmethod
+    def _coerce_json_list(cls, value: list[str] | None) -> list[str]:
+        """SQLite JSON columns added later are NULL on old rows — treat as []."""
+        return value if value is not None else []
 
 
 class Entity(EntityBase, table=True):
@@ -218,6 +225,11 @@ class ProgressBase(SQLModel):
     daily_goal_xp: int = 30
     xp_today: int = 0
     categories: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+    @field_validator("categories", mode="before")
+    @classmethod
+    def _coerce_categories(cls, value: list[str] | None) -> list[str]:
+        return value if value is not None else []
 
 
 class Progress(ProgressBase, table=True):
