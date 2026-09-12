@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from pydantic import model_validator
 from sqlalchemy import Column, JSON, Text
 from pydantic import field_validator
 from sqlmodel import Field, SQLModel
@@ -49,6 +50,7 @@ class EntityBase(SQLModel):
     body: Optional[str] = Field(default=None, sa_column=Column(Text))
     date_start: Optional[str] = Field(default=None, max_length=32)  # ISO date or year, e.g. -0044
     date_end: Optional[str] = Field(default=None, max_length=32)
+    ongoing: bool = Field(default=False)
     reign_start: Optional[str] = Field(default=None, max_length=32)
     reign_end: Optional[str] = Field(default=None, max_length=32)
     parent_id: Optional[str] = Field(default=None, foreign_key="entity.id", index=True)
@@ -93,6 +95,7 @@ class EntityUpdate(SQLModel):
     body: Optional[str] = None
     date_start: Optional[str] = None
     date_end: Optional[str] = None
+    ongoing: Optional[bool] = None
     reign_start: Optional[str] = None
     reign_end: Optional[str] = None
     parent_id: Optional[str] = None
@@ -117,6 +120,23 @@ class EntityRead(EntityBase):
     id: str
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_json_lists(cls, data):
+        """SQLite JSON columns can be NULL on older rows; API responses need lists."""
+        if hasattr(data, "model_dump"):
+            data = data.model_dump()
+        if not isinstance(data, dict):
+            return data
+        for key in ("tags", "attachments", "country_names"):
+            if data.get(key) is None:
+                data[key] = []
+        if data.get("ongoing") is None:
+            data["ongoing"] = False
+        if not data.get("country_names") and (data.get("country_name") or "").strip():
+            data["country_names"] = [str(data["country_name"]).strip()]
+        return data
 
 
 class TopicCreate(SQLModel):

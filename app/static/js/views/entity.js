@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import {
   escapeHtml,
   formatDate,
+  formatEntityRange,
   formatRange,
   formatCountryNames,
   isImageUrl,
@@ -302,7 +303,7 @@ function duringTimeSectionHtml(items) {
         ${sorted
           .map((item) => {
             const ent = item.entity;
-            const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+            const r = formatEntityRange(ent) || formatDate(ent.date_start);
             const fromParent = item.parent?.title
               ? `<span class="text-xs text-ink-faint">from ${escapeHtml(item.parent.title)}</span>`
               : "";
@@ -345,7 +346,7 @@ function milestonesSectionHtml(milestones) {
         ${sorted
           .map((item) => {
             const ent = item.entity;
-            const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+            const r = formatEntityRange(ent) || formatDate(ent.date_start);
             return `
             <li class="relative pb-5 last:pb-0">
               <span class="absolute -left-[1.4rem] top-1.5 h-2.5 w-2.5 rounded-full bg-accent ring-4 ring-paper"></span>
@@ -392,7 +393,7 @@ function bindMilestoneEditButtons(root, parentEvent) {
 }
 
 function renderEventDetail(root, data, e, bodyHtml) {
-  const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+  const range = formatEntityRange(e) || formatDate(e.date_start);
   const related = { ...(data.related || {}) };
   const milestones = related.milestone || [];
   const phases = related.phase || [];
@@ -473,7 +474,7 @@ function renderEventDetail(root, data, e, bodyHtml) {
               ${phases
                 .map((item) => {
                   const ent = item.entity;
-                  const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+                  const r = formatEntityRange(ent) || formatDate(ent.date_start);
                   return `
                   <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                     <div class="flex-1 min-w-0">
@@ -507,7 +508,7 @@ function renderEventDetail(root, data, e, bodyHtml) {
                   ${items
                     .map((item) => {
                       const ent = item.entity;
-                      const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+                      const r = formatEntityRange(ent) || formatDate(ent.date_start);
                       return `
                       <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                         <div class="flex-1 min-w-0">
@@ -583,7 +584,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
         : e.type === "place"
           ? "Countries"
           : "Library";
-  const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+  const range = formatEntityRange(e) || formatDate(e.date_start);
   const related = { ...(data.related || {}) };
   const eventItems = related.event || [];
   const phaseItems = related.phase || [];
@@ -692,7 +693,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
                 ${phaseItems
                   .map((item) => {
                     const ent = item.entity;
-                    const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+                    const r = formatEntityRange(ent) || formatDate(ent.date_start);
                     return `
                     <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                       <div class="flex-1 min-w-0">
@@ -727,7 +728,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
                 ${eventItems
                   .map((item) => {
                     const ent = item.entity;
-                    const r = formatRange(ent.date_start, ent.date_end) || formatDate(ent.date_start);
+                    const r = formatEntityRange(ent) || formatDate(ent.date_start);
                     return `
                     <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                       <div class="flex-1 min-w-0">
@@ -851,7 +852,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
 }
 
 function renderFigureBiography(root, data, e, bodyHtml) {
-  const lifeRange = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+  const lifeRange = formatEntityRange(e) || formatDate(e.date_start);
   const reignRange = formatRange(e.reign_start, e.reign_end) || formatDate(e.reign_start);
   const lifeEvents = data.life_events || [];
   const related = { ...(data.related || {}) };

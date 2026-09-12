@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Optional
+
+
+def present_year() -> int:
+    """Current calendar year (always AC on the signed timeline)."""
+    return date.today().year
+
+
+def parse_year_int(year: Optional[int | str]) -> Optional[int]:
+    """Parse a year, ignoring thousands separators (1,000 → 1000)."""
+    if year is None:
+        return None
+    raw = str(year).strip().replace(",", "")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def compose_date(
@@ -20,11 +39,8 @@ def compose_date(
     With day → "1815-06-18" / "-0044-03-15".
     Returns None if year is missing/blank.
     """
-    if year is None or str(year).strip() == "":
-        return None
-    try:
-        y = int(str(year).strip())
-    except ValueError:
+    y = parse_year_int(year)
+    if y is None:
         return None
     if y < 0:
         y = abs(y)
@@ -141,9 +157,31 @@ def format_display_date(value: Optional[str]) -> str:
     return f"{year_label} {era}"
 
 
-def format_date_range(start: Optional[str], end: Optional[str]) -> str:
+def signed_year(value: Optional[str]) -> Optional[int]:
+    parsed = parse_historia_date(value)
+    return parsed[0] if parsed else None
+
+
+def effective_end_year(date_end: Optional[str], ongoing: bool = False) -> Optional[int]:
+    """End year for overlap/bands: Present when ongoing, else parsed date_end."""
+    if ongoing:
+        return present_year()
+    return signed_year(date_end)
+
+
+def format_display_end(date_end: Optional[str], ongoing: bool = False) -> str:
+    if ongoing:
+        return "Present"
+    return format_display_date(date_end)
+
+
+def format_date_range(
+    start: Optional[str],
+    end: Optional[str],
+    ongoing: bool = False,
+) -> str:
     a = format_display_date(start)
-    b = format_display_date(end)
+    b = format_display_end(end, ongoing)
     if a and b:
         return f"{a} – {b}"
     return a or b or ""

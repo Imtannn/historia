@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from app.api.roles import http_normalize_role
-from app.dates import date_sort_key, parse_historia_date
+from app.dates import date_sort_key, effective_end_year, parse_historia_date
 from app.db import get_session
 from app.catalog import COUNTRIES, EMPIRES
 from app.models import (
@@ -170,7 +170,7 @@ def _signed_year(value: Optional[str]) -> Optional[int]:
 
 def _year_range(entity: Entity) -> Optional[tuple[int, int]]:
     y0 = _signed_year(entity.date_start)
-    y1 = _signed_year(entity.date_end)
+    y1 = effective_end_year(entity.date_end, bool(getattr(entity, "ongoing", False)))
     if y0 is None and y1 is None:
         return None
     if y0 is None:
@@ -458,6 +458,11 @@ def create_entity(payload: EntityCreate, session: Session = Depends(get_session)
         data["tags"] = []
     if data.get("attachments") is None:
         data["attachments"] = []
+    if data.get("ongoing"):
+        data["date_end"] = None
+        data["ongoing"] = True
+    else:
+        data["ongoing"] = False
 
     # Events need at least one anchor: period, phase, figure link, or country
     if payload.type == EntityType.event:
@@ -580,6 +585,8 @@ def update_entity(
     )
     for key, value in updates.items():
         setattr(entity, key, value)
+    if entity.ongoing:
+        entity.date_end = None
     if payload.country_names is not None or payload.country_name is not None:
         names = _normalize_country_names(entity.country_names, entity.country_name)
         entity.country_names = names

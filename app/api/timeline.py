@@ -7,7 +7,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlmodel import Session, select
 
-from app.dates import date_sort_key, format_display_date, parse_historia_date
+from app.dates import (
+    date_sort_key,
+    effective_end_year,
+    format_display_date,
+    format_display_end,
+    format_year_number,
+    parse_historia_date,
+)
 from app.db import get_session
 from app.models import Entity, EntityRead, EntityType, Link
 
@@ -43,9 +50,13 @@ def _pct(year: float, lo: float, hi: float) -> float:
     return round(((year - lo) / span) * 100.0, 3)
 
 
+def _end_year(entity: Entity) -> Optional[int]:
+    return effective_end_year(entity.date_end, bool(getattr(entity, "ongoing", False)))
+
+
 def _band_payload(entity: Entity, lo: float, hi: float, years: list[int], stroke: str, fill: str) -> Optional[dict]:
     y0 = _year(entity.date_start)
-    y1 = _year(entity.date_end)
+    y1 = _end_year(entity)
     if y0 is None or y1 is None or not years:
         return None
     left = _pct(min(y0, y1), lo, hi)
@@ -59,7 +70,7 @@ def _band_payload(entity: Entity, lo: float, hi: float, years: list[int], stroke
         "color": stroke,
         "fill": fill,
         "display_start": format_display_date(entity.date_start),
-        "display_end": format_display_date(entity.date_end),
+        "display_end": format_display_end(entity.date_end, bool(getattr(entity, "ongoing", False))),
     }
 
 
@@ -120,14 +131,14 @@ def get_timeline(
     years: list[int] = []
     for e in events:
         y0 = _year(e.date_start)
-        y1 = _year(e.date_end)
+        y1 = _end_year(e)
         if y0 is not None:
             years.append(y0)
         if y1 is not None:
             years.append(y1)
     for p in periods + phases:
         y0 = _year(p.date_start)
-        y1 = _year(p.date_end)
+        y1 = _end_year(p)
         if y0 is not None:
             years.append(y0)
         if y1 is not None:
@@ -144,7 +155,7 @@ def get_timeline(
     items = []
     for e in events:
         y0 = _year(e.date_start)
-        y1 = _year(e.date_end)
+        y1 = _end_year(e) if getattr(e, "ongoing", False) or e.date_end else None
         if y0 is None:
             pos = None
             pos_end = None
@@ -155,7 +166,9 @@ def get_timeline(
             {
                 "entity": EntityRead.model_validate(e),
                 "display_date": format_display_date(e.date_start),
-                "display_end": format_display_date(e.date_end) if e.date_end else None,
+                "display_end": format_display_end(e.date_end, bool(getattr(e, "ongoing", False)))
+                if getattr(e, "ongoing", False) or e.date_end
+                else None,
                 "position": pos,
                 "position_end": pos_end,
                 "sort_year": y0,
@@ -195,7 +208,7 @@ def get_timeline(
                     {
                         "year": y,
                         "position": _pct(y, lo, hi),
-                        "label": f"{abs(y)} BC" if y < 0 else f"{y} AC",
+                        "label": f"{format_year_number(y)} BC" if y < 0 else f"{format_year_number(y)} AC",
                     }
                 )
             y += step

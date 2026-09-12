@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from sqlmodel import Session, select
 
-from app.dates import format_display_date
+from app.dates import format_date_range, format_display_date
 from app.models import Entity, EntityType, Link, RelationType, ReviewState
 from app.progress_logic import XP_FLASHCARD, XP_MATCH, XP_MCQ, XP_TYPEIN
 
@@ -92,8 +92,10 @@ def generate_flashcard(session: Session, entity: Entity) -> Optional[dict[str, A
             return {
                 "entity_id": entity.id,
                 "prompt": f"When did {entity.title} happen?",
-                "answer": format_display_date(entity.date_start)
-                + (f" – {format_display_date(entity.date_end)}" if entity.date_end else ""),
+                "answer": format_date_range(
+                    entity.date_start, entity.date_end, bool(getattr(entity, "ongoing", False))
+                )
+                or format_display_date(entity.date_start),
                 "kind": "when",
                 "xp": XP_FLASHCARD,
             }
@@ -155,11 +157,8 @@ def generate_flashcard(session: Session, entity: Entity) -> Optional[dict[str, A
 
     if t == EntityType.period:
         if entity.date_start or entity.date_end:
-            rng = " – ".join(
-                filter(
-                    None,
-                    [format_display_date(entity.date_start), format_display_date(entity.date_end)],
-                )
+            rng = format_date_range(
+                entity.date_start, entity.date_end, bool(getattr(entity, "ongoing", False))
             )
             return {
                 "entity_id": entity.id,

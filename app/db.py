@@ -47,6 +47,7 @@ _ENTITY_EXTRA_COLUMNS = {
     "country_name": "ALTER TABLE entity ADD COLUMN country_name VARCHAR(500)",
     "country_names": "ALTER TABLE entity ADD COLUMN country_names JSON",
     "category": "ALTER TABLE entity ADD COLUMN category VARCHAR(64)",
+    "ongoing": "ALTER TABLE entity ADD COLUMN ongoing BOOLEAN DEFAULT 0",
 }
 
 _LINK_EXTRA_COLUMNS = {
@@ -85,6 +86,35 @@ def init_db() -> None:
             existing.categories = []
             session.add(existing)
         session.commit()
+        ensure_world_countries(session)
+        session.commit()
+
+
+def ensure_world_countries(session: Session) -> int:
+    """Idempotently add the built-in world country list to the Countries hub."""
+    from app.catalog import COUNTRIES
+    from app.models import Entity, EntityType
+
+    existing = session.exec(select(Entity).where(Entity.type == EntityType.place)).all()
+    have = {e.title.strip().lower() for e in existing if e.title}
+    added = 0
+    for name, flag in COUNTRIES:
+        title = str(name).strip()
+        if not title or title.lower() in have:
+            continue
+        session.add(
+            Entity(
+                type=EntityType.place,
+                title=title,
+                summary=(flag or "").strip() or None,
+                tags=[],
+                attachments=[],
+                country_names=[],
+            )
+        )
+        have.add(title.lower())
+        added += 1
+    return added
 
 
 def get_session():
@@ -100,4 +130,5 @@ def wipe_all(session: Session) -> None:
         for row in session.exec(select(model)).all():
             session.delete(row)
     session.add(Progress(id=1))
+    ensure_world_countries(session)
     session.commit()

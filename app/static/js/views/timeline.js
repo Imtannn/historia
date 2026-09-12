@@ -5,9 +5,12 @@ import { openAddPhase } from "../modal.js";
 import {
   compareByDateThenTitle,
   escapeHtml,
+  formatCountryNames,
   formatDate,
-  formatRange,
+  formatEntityRange,
   formatSignedYear,
+  effectiveEndYear,
+  rangesOverlap,
   storedToSignedYear,
   typeLabel,
 } from "../util.js";
@@ -36,7 +39,6 @@ const WHEEL_ZOOM_STEP_PX = 140;
 const TAG_DEBOUNCE_MS = 250;
 const MOBILE_MQ = "(max-width: 767px)";
 const HORIZONTAL_STAGE_H = 28 * 16; // ~28rem card lane
-const REL_PART_OF = "part_of";
 const REL_CHILD = "child";
 const SCOPE_ALL = "";
 const SCOPE_TL = "timeline";
@@ -137,11 +139,11 @@ function projectBand(band, lo, hi) {
 /** @param {TimelineEntity} e */
 function entityToTimelineItem(e) {
   const y0 = storedToSignedYear(e.date_start);
-  const y1 = storedToSignedYear(e.date_end);
+  const y1 = effectiveEndYear(e);
   return {
     entity: e,
     display_date: formatDate(e.date_start) || "?",
-    display_end: e.date_end ? formatDate(e.date_end) : null,
+    display_end: e.ongoing ? "Present" : e.date_end ? formatDate(e.date_end) : null,
     sort_year: y0,
     end_year: y1,
   };
@@ -162,7 +164,7 @@ function parseScopeValue(raw) {
 function bandOptionLabel(b) {
   const title = b.entity?.title || "Untitled";
   const a = formatSignedYear(b.start_year);
-  const z = formatSignedYear(b.end_year);
+  const z = b.entity?.ongoing ? "Present" : formatSignedYear(b.end_year);
   return a && z ? `${title} (${a} – ${z})` : title;
 }
 
@@ -222,7 +224,7 @@ function renderAxisSegmentsHtml(phaseBands, horizontal) {
       const title = p.entity?.title || "Phase";
       const range =
         p.start_year != null && p.end_year != null
-          ? `${formatSignedYear(p.start_year)} – ${formatSignedYear(p.end_year)}`
+          ? `${formatSignedYear(p.start_year)} – ${p.entity?.ongoing ? "Present" : formatSignedYear(p.end_year)}`
           : "";
       const tip = range ? `${title} · ${range}` : title;
       return `
@@ -364,7 +366,7 @@ function scopeSelectHtml({ timelines, phases, periods, selectedValue }) {
 }
 
 function dateLabelForEntity(e) {
-  return formatRange(e?.date_start, e?.date_end) || formatDate(e?.date_start) || "?";
+  return formatEntityRange(e) || formatDate(e?.date_start) || "?";
 }
 
 function relationValue(rel) {
@@ -376,11 +378,6 @@ function relationValue(rel) {
 /** @param {NeighborItem} x */
 function isChildNeighbor(x) {
   return x.direction === REL_CHILD || relationValue(x.relation) === REL_CHILD;
-}
-
-/** @param {NeighborItem} x */
-function isPartOfNeighbor(x) {
-  return relationValue(x.relation) === REL_PART_OF;
 }
 
 function mmapEmptyHtml(message) {
@@ -795,15 +792,6 @@ function yearAtScroll(host, stage, worldLo, worldHi, clientCoord = null, horizon
 async function fetchChildren(id, kind) {
   const data = await api.neighbors(id);
   const related = data.related || {};
-  if (kind === "phase") {
-    /** @type {NeighborItem[]} */
-    const raw = related.event || [];
-    const partOf = raw.filter(isPartOfNeighbor).map((x) => x.entity).filter(Boolean);
-    const entities = partOf.length
-      ? partOf
-      : raw.map((x) => x.entity).filter(Boolean);
-    return sortEntitiesByDate(entities);
-  }
   /** @type {NeighborItem[]} */
   const moments = (related.milestone || [])
     .filter(isChildNeighbor)
@@ -812,18 +800,32 @@ async function fetchChildren(id, kind) {
   return sortEntitiesByDate(moments);
 }
 
-/** Events belonging to one phase, or all phases when phaseIds is the full set. */
-async function fetchPhaseEventItems(phaseIds, worldLo, worldHi) {
-  const ids = (phaseIds || []).filter(Boolean);
-  if (!ids.length || worldLo == null || worldHi == null) return [];
-  const lists = await Promise.all(
-    ids.map((id) => fetchChildren(id, "phase").catch(() => []))
-  );
+function eventMatchesPhase(event, phase) {
+  const p0 = storedToSignedYear(phase?.date_start);
+  if (p0 == null) return false;
+  const p1 = effectiveEndYear(phase) ?? p0;
+  const e0 = storedToSignedYear(event?.date_start);
+  if (e0 == null) return false;
+  const e1 = effectiveEndYear(event) ?? e0;
+  if (!rangesOverlap(e0, e1, p0, p1)) return false;
+  const phaseCountries = formatCountryNames(phase).map((n) => n.toLowerCase());
+  if (!phaseCountries.length) return true;
+  const want = new Set(phaseCountries);
+  return formatCountryNames(event).some((n) => want.has(n.toLowerCase()));
+}
+
+/** Events overlapping a phase window (optional country), not part_of links. */
+function fetchPhaseEventItems(phaseEntities, datedEvents, worldLo, worldHi) {
+  const phases = (phaseEntities || []).filter(Boolean);
+  if (!phases.length || worldLo == null || worldHi == null) return [];
   /** @type {Map<string, TimelineEntity>} */
   const byId = new Map();
-  for (const entities of lists) {
-    for (const e of entities) {
-      if (e?.id) byId.set(e.id, e);
+  for (const phase of phases) {
+    for (const item of datedEvents || []) {
+      const e = item?.entity;
+      if (!e?.id || e.type === "milestone") continue;
+      if (!eventMatchesPhase(e, phase)) continue;
+      byId.set(e.id, e);
     }
   }
   return sortEntitiesByDate([...byId.values()])
@@ -878,14 +880,10 @@ export async function renderTimeline(root, { query = {} } = {}) {
   /** @type {TimelineItem[]} */
   let phaseEventItems = [];
   if (view === "phases" && hasRange && phases.length) {
-    const phaseIds = phaseId
-      ? [phaseId]
-      : phases.map((p) => p.entity?.id).filter(Boolean);
-    try {
-      phaseEventItems = await fetchPhaseEventItems(phaseIds, worldLo, worldHi);
-    } catch {
-      phaseEventItems = [];
-    }
+    const phaseEntities = (phaseId ? phases.filter((p) => p.entity?.id === phaseId) : phases)
+      .map((p) => p.entity)
+      .filter(Boolean);
+    phaseEventItems = fetchPhaseEventItems(phaseEntities, datedEvents, worldLo, worldHi);
   }
 
   let zoomIndex = DEFAULT_ZOOM_INDEX >= 0 ? DEFAULT_ZOOM_INDEX : 0;

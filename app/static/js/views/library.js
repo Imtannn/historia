@@ -1,7 +1,7 @@
 /** Event board — sorted events, filters, multi-select → group into topic. */
 
 import { api } from "../api.js";
-import { escapeHtml, entityMatches, formatDate, formatRange, formatCountryNames, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel, isImageUrl } from "../util.js";
+import { escapeHtml, entityMatches, formatDate, formatEntityRange, formatCountryNames, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel, isImageUrl, bindYearInputs, presentYear } from "../util.js";
 import { openAddPhase, openAddTopic, openAddFigure, openAddCountry } from "../modal.js";
 
 const HUB_TABS = {
@@ -234,7 +234,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
         : `<div class="space-y-2" id="lib-list">
             ${filtered
               .map((e) => {
-                const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+                const range = formatEntityRange(e) || formatDate(e.date_start);
                 return `
                 <div class="entity-row items-center !cursor-default" data-row="${e.id}">
                   <label class="shrink-0 flex items-center p-1 cursor-pointer" title="Select for topic">
@@ -457,15 +457,15 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
                   </div>
                   ${t.summary && tab !== "countries" ? `<p class="text-sm text-ink-muted mt-0.5">${escapeHtml(t.summary)}</p>` : ""}
                   ${
-                    isFigures && (t.date_start || t.date_end)
-                      ? `<p class="text-xs text-ink-faint mt-0.5 tabular-nums">${escapeHtml(formatDate(t.date_start) || "—")}${t.date_end ? ` – ${escapeHtml(formatDate(t.date_end))}` : ""}</p>`
+                    isFigures && (t.date_start || t.date_end || t.ongoing)
+                      ? `<p class="text-xs text-ink-faint mt-0.5 tabular-nums">${escapeHtml(formatEntityRange(t) || formatDate(t.date_start) || "—")}</p>`
                       : ""
                   }
                   ${
                     isRanged
                       ? `<p class="text-xs text-ink-faint mt-0.5 tabular-nums">${
-                          formatRange(t.date_start, t.date_end)
-                            ? escapeHtml(formatRange(t.date_start, t.date_end))
+                          formatEntityRange(t)
+                            ? escapeHtml(formatEntityRange(t))
                             : "No From – To yet — open to set"
                         }</p>`
                       : ""
@@ -505,18 +505,18 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
   document.getElementById("hub-add-country")?.addEventListener("click", openLibraryAddCountry);
   document.getElementById("hub-add-country-empty")?.addEventListener("click", openLibraryAddCountry);
 
-  async function createPeriod({ title, summary, date_start, date_end }) {
+  async function createPeriod({ title, summary, date_start, date_end, ongoing = false }) {
     const name = String(title || "").trim();
     if (!name) {
       toast("Enter a name");
       return;
     }
-    if (!date_start || !date_end) {
-      toast("Set both From and To years");
+    if (!date_start || (!ongoing && !date_end)) {
+      toast(ongoing ? "Set a From year" : "Set both From and To years");
       return;
     }
     const startN = storedToSignedYear(date_start);
-    const endN = storedToSignedYear(date_end);
+    const endN = ongoing ? presentYear() : storedToSignedYear(date_end);
     if (startN != null && endN != null && startN > endN) {
       toast("From must be earlier than To");
       return;
@@ -528,7 +528,8 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
         summary: summary || null,
         body: null,
         date_start,
-        date_end,
+        date_end: ongoing ? null : date_end,
+        ongoing,
         parent_id: null,
         tags: [],
         attachments: [],
@@ -572,7 +573,7 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
           <div>
             <label class="label" for="add-period-from">From</label>
             <div class="flex gap-2 items-center">
-              <input id="add-period-from" class="input" inputmode="numeric" placeholder="Year" required />
+              <input id="add-period-from" class="input" data-year-input inputmode="numeric" placeholder="Year" required />
               <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-period-from-era" value="ac" checked /> AC</label>
               <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-period-from-era" value="bc" /> BC</label>
             </div>
@@ -580,10 +581,14 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
           <div>
             <label class="label" for="add-period-to">To</label>
             <div class="flex gap-2 items-center">
-              <input id="add-period-to" class="input" inputmode="numeric" placeholder="Year" required />
+              <input id="add-period-to" class="input" data-year-input inputmode="numeric" placeholder="Year" />
               <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-period-to-era" value="ac" checked /> AC</label>
               <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-period-to-era" value="bc" /> BC</label>
             </div>
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer mt-1.5">
+              <input type="checkbox" id="add-period-ongoing" class="accent-accent" />
+              Until now
+            </label>
           </div>
         </div>
         <div class="flex justify-end gap-2 pt-1">
@@ -597,16 +602,29 @@ async function renderHubTab(root, { tab, filterQ = "" } = {}) {
     const nameEl = document.getElementById("add-period-name");
     const fromEl = document.getElementById("add-period-from");
     const toEl = document.getElementById("add-period-to");
+    const ongoingEl = document.getElementById("add-period-ongoing");
+    bindYearInputs(panel);
+    const syncOngoing = () => {
+      const on = Boolean(ongoingEl?.checked);
+      if (toEl) toEl.disabled = on;
+      document.querySelectorAll('input[name="add-period-to-era"]').forEach((el) => {
+        el.disabled = on;
+      });
+    };
+    ongoingEl?.addEventListener("change", syncOngoing);
+    syncOngoing();
 
     document.getElementById("add-period-form")?.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const fromEra = document.querySelector('input[name="add-period-from-era"]:checked')?.value || "ac";
       const toEra = document.querySelector('input[name="add-period-to-era"]:checked')?.value || "ac";
+      const ongoing = Boolean(ongoingEl?.checked);
       await createPeriod({
         title: nameEl?.value || "",
         summary: document.getElementById("add-period-summary")?.value.trim() || null,
         date_start: composeDate(fromEl?.value.trim(), null, null, fromEra),
-        date_end: composeDate(toEl?.value.trim(), null, null, toEra),
+        date_end: ongoing ? null : composeDate(toEl?.value.trim(), null, null, toEra),
+        ongoing,
       });
       modal.classList.add("hidden");
       panel.innerHTML = "";
@@ -781,7 +799,7 @@ async function renderGalleryTab(
             ${items
               .map(({ entity: e, images }) => {
                 const thumb = images[0];
-                const range = formatRange(e.date_start, e.date_end) || formatDate(e.date_start);
+                const range = formatEntityRange(e) || formatDate(e.date_start);
                 return `
                 <a href="#/entity/${e.id}" class="gallery-card no-underline text-inherit">
                   <div class="gallery-thumb-wrap">

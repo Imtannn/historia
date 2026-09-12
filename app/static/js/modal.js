@@ -2,15 +2,21 @@
 
 import { api } from "./api.js";
 import {
+  bindYearInputs,
   composeDate,
   escapeHtml,
-  formatRange,
+  effectiveEndYear,
+  formatCountryNames,
+  formatDate,
+  formatEntityRange,
   formatSignedYear,
   iconEvent,
   iconFigure,
   isImageUrl,
   mediaPreviewHtml,
   normalizeTag,
+  parseYearDigits,
+  presentYear,
   splitDateParts,
   storedToSignedYear,
   toast,
@@ -30,6 +36,118 @@ let attachments = [];
 /** Periods / phases kept even if dates don’t auto-map (hub CTAs / edit links). */
 let pinnedPeriodIds = new Set();
 let pinnedPhaseIds = new Set();
+
+function untilNowCheckboxHtml(id, checked = false) {
+  return `
+    <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer mt-1.5">
+      <input type="checkbox" id="${id}" class="accent-accent" ${checked ? "checked" : ""} />
+      Until now
+    </label>`;
+}
+
+function bindUntilNowControl(checkboxId, { inputIds = [], radioNames = [] } = {}) {
+  const cb = document.getElementById(checkboxId);
+  if (!cb) return;
+  const sync = () => {
+    const on = cb.checked;
+    for (const id of inputIds) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.disabled = on;
+      if (on) el.removeAttribute("required");
+    }
+    for (const name of radioNames) {
+      document.querySelectorAll(`input[name="${name}"]`).forEach((el) => {
+        el.disabled = on;
+      });
+    }
+  };
+  cb.addEventListener("change", sync);
+  sync();
+}
+
+function isUntilNow(id) {
+  return Boolean(document.getElementById(id)?.checked);
+}
+
+function canonicalPlaceTitle(name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key) return "";
+  const hit = (hubs.country || []).find((p) => p.title.toLowerCase() === key);
+  return hit?.title || String(name || "").trim();
+}
+
+function phaseCountryFieldHtml(value = "") {
+  return `
+    <div>
+      <label class="label" for="phase-country">Country <span class="font-normal text-ink-faint">(optional)</span></label>
+      <div class="relative">
+      <input id="phase-country" class="input pr-8" maxlength="500" placeholder="Search countries…" value="${escapeHtml(value)}" autocomplete="off" />
+      <span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-faint text-xs" aria-hidden="true">▾</span>
+      </div>
+      <div id="phase-country-catalog" class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
+      <p class="text-xs text-ink-faint mt-1">Pick from the world list, or type a name and create it. Leave empty to include every event in this timeframe.</p>
+    </div>`;
+}
+
+function readPhaseCountryNames() {
+  const name = document.getElementById("phase-country")?.value.trim();
+  return name ? [canonicalPlaceTitle(name)] : [];
+}
+
+async function resolvePhaseCountry() {
+  const names = readPhaseCountryNames();
+  if (!names.length) {
+    return { country_names: [], country_name: null, country_ids: [] };
+  }
+  const country_ids = await ensurePlacesForNames(names);
+  const title = canonicalPlaceTitle(names[0]);
+  return {
+    country_names: title ? [title] : [],
+    country_name: title || null,
+    country_ids,
+  };
+}
+
+function bindHubCountryCombobox({ inputId, listId, mode = "fill", excludeNames = () => [], onPick }) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+
+  const refresh = () => {
+    renderSavedCountryCatalog({
+      boxId: listId,
+      searchId: inputId,
+      excludeNames: typeof excludeNames === "function" ? excludeNames() : excludeNames,
+      mode,
+      onPick: async (name) => {
+        await onPick(name);
+        refresh();
+      },
+    });
+  };
+
+  input.addEventListener("input", refresh);
+  input.addEventListener("focus", refresh);
+  refresh();
+  return refresh;
+}
+
+function bindPhaseCountryField() {
+  bindHubCountryCombobox({
+    inputId: "phase-country",
+    listId: "phase-country-catalog",
+    mode: "fill",
+    onPick: async (name) => {
+      const input = document.getElementById("phase-country");
+      if (input) input.value = name;
+    },
+  });
+}
+
+function bindFormYearInputs(formId) {
+  const form = document.getElementById(formId);
+  if (form) bindYearInputs(form);
+}
 
 function empireNameSet() {
   return new Set((catalog.empires || []).map((e) => e.name.toLowerCase()));
@@ -157,7 +275,7 @@ function defaultCreateYearsFromEvent() {
 function periodMetaFor(periodOrName) {
   if (periodOrName && typeof periodOrName === "object") {
     const start = storedToSignedYear(periodOrName.date_start);
-    const end = storedToSignedYear(periodOrName.date_end);
+    const end = periodOrName.ongoing ? presentYear() : storedToSignedYear(periodOrName.date_end);
     if (start != null || end != null) {
       const a = start ?? end;
       const b = end ?? start;
@@ -165,6 +283,7 @@ function periodMetaFor(periodOrName) {
         name: periodOrName.title,
         start_year: Math.min(a, b),
         end_year: Math.max(a, b),
+        ongoing: Boolean(periodOrName.ongoing),
       };
     }
     return null;
@@ -179,14 +298,15 @@ function normalizeYearRange(start, end = start) {
   return start <= hi ? { lo: start, hi } : { lo: hi, hi: start };
 }
 
-function periodOverlapsRange(meta, start, end) {
+function periodOverlapsRange(meta, start, end, { inclusive = false } = {}) {
   if (!meta || meta.start_year == null || meta.end_year == null) return false;
   const r = normalizeYearRange(start, end);
   if (!r) return false;
   const plo = Math.min(meta.start_year, meta.end_year);
   const phi = Math.max(meta.start_year, meta.end_year);
-  // Share interior years on the signed timeline; endpoint-only touch does not count
-  // (Prehistory …3300 BC must not claim Bronze Age 3300 BC…).
+  // Inclusive: an event in 208 BC belongs to a phase that starts in 208 BC.
+  // Exclusive: used when linking eras so a boundary year is not claimed twice.
+  if (inclusive) return r.lo <= phi && r.hi >= plo;
   return r.lo < phi && r.hi > plo;
 }
 
@@ -195,13 +315,13 @@ function periodOverlapsRange(meta, start, end) {
  * A span that crosses period boundaries matches every overlapping era
  * (so a phase/event can belong to more than one period).
  */
-function scoreNotebookEras(hubList, start, end = start) {
+function scoreNotebookEras(hubList, start, end = start, { inclusive = false } = {}) {
   const r = normalizeYearRange(start, end);
   if (!r) return [];
   const out = [];
   for (const ent of hubList || []) {
     const meta = periodMetaFor(ent);
-    if (!periodOverlapsRange(meta, r.lo, r.hi)) continue;
+    if (!periodOverlapsRange(meta, r.lo, r.hi, { inclusive })) continue;
     const plo = Math.min(meta.start_year, meta.end_year);
     const phi = Math.max(meta.start_year, meta.end_year);
     out.push({
@@ -221,13 +341,13 @@ function scoreNotebookEras(hubList, start, end = start) {
 }
 
 /** Notebook periods that best match [start, end] on the signed timeline. */
-function findNotebookPeriodsContaining(start, end = start) {
-  return scoreNotebookEras(hubs.period || [], start, end);
+function findNotebookPeriodsContaining(start, end = start, opts = {}) {
+  return scoreNotebookEras(hubs.period || [], start, end, opts);
 }
 
 /** Notebook phases that best match [start, end]. */
-function findNotebookPhasesContaining(start, end = start) {
-  return scoreNotebookEras(hubs.phase || [], start, end);
+function findNotebookPhasesContaining(start, end = start, opts = {}) {
+  return scoreNotebookEras(hubs.phase || [], start, end, opts);
 }
 
 function collectPinned(kind) {
@@ -258,9 +378,10 @@ function autoAssignPeriodsFromEventDates() {
   }
 
   const start = from.signed;
-  const end = to.signed ?? from.signed;
-  const periodHits = findNotebookPeriodsContaining(start, end);
-  const phaseHits = findNotebookPhasesContaining(start, end);
+  const end = isUntilNow("qa-ongoing") ? presentYear() : to.signed ?? from.signed;
+  const opts = { inclusive: true };
+  const periodHits = findNotebookPeriodsContaining(start, end, opts);
+  const phaseHits = findNotebookPhasesContaining(start, end, opts);
   const pinnedPeriods = collectPinned("period");
   const pinnedPhases = collectPinned("phase");
 
@@ -350,8 +471,8 @@ function eraForSide(prefix) {
 function signedYearFromSide(prefix) {
   const year = document.getElementById(`${prefix}-year`)?.value;
   if (year == null || String(year).trim() === "") return null;
-  let y = parseInt(String(year).trim(), 10);
-  if (Number.isNaN(y)) return null;
+  let y = parseYearDigits(year);
+  if (y == null) return null;
   y = Math.abs(y);
   const era = eraForSide(prefix);
   return era === "bc" ? -y : y;
@@ -579,12 +700,20 @@ function renderCountryChips() {
   });
 }
 
+function belongEmptyHint(kind) {
+  const from = readEventDateSide("qa-from");
+  if (from.signed != null && !from.error) {
+    return `No ${kind}s cover these dates — search above to add one.`;
+  }
+  return "None yet — search above, or enter dates to auto-map.";
+}
+
 function renderPeriodChips() {
   const box = document.getElementById("belong-chips-period");
   if (!box) return;
   const periods = [...selectedBelong.period.values()];
   if (!periods.length) {
-    box.innerHTML = `<p class="text-sm text-ink-faint py-1">None yet — search above, or enter dates to auto-map.</p>`;
+    box.innerHTML = `<p class="text-sm text-ink-faint py-1">${belongEmptyHint("period")}</p>`;
     return;
   }
   box.innerHTML = `
@@ -613,7 +742,7 @@ function renderPhaseChips() {
   if (!box) return;
   const phases = [...selectedBelong.phase.values()];
   if (!phases.length) {
-    box.innerHTML = `<p class="text-sm text-ink-faint py-1">None yet — search above, or enter dates to auto-map.</p>`;
+    box.innerHTML = `<p class="text-sm text-ink-faint py-1">${belongEmptyHint("phase")}</p>`;
     return;
   }
   box.innerHTML = `
@@ -812,7 +941,7 @@ function renderPeriodCatalog() {
         <div>
           <label class="text-[11px] text-ink-faint" for="period-create-from">From</label>
           <div class="flex gap-1 items-center mt-0.5">
-            <input id="period-create-from" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
+            <input id="period-create-from" class="input py-1.5 text-sm" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
             <select id="period-create-from-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
               <option value="ac" ${fromEra === "ac" ? "selected" : ""}>AC</option>
               <option value="bc" ${fromEra === "bc" ? "selected" : ""}>BC</option>
@@ -822,7 +951,7 @@ function renderPeriodCatalog() {
         <div>
           <label class="text-[11px] text-ink-faint" for="period-create-to">To</label>
           <div class="flex gap-1 items-center mt-0.5">
-            <input id="period-create-to" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
+            <input id="period-create-to" class="input py-1.5 text-sm" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
             <select id="period-create-to-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
               <option value="ac" ${toEra === "ac" ? "selected" : ""}>AC</option>
               <option value="bc" ${toEra === "bc" ? "selected" : ""}>BC</option>
@@ -837,6 +966,7 @@ function renderPeriodCatalog() {
     </div>`;
   }
   box.innerHTML = html;
+  bindYearInputs(box);
   bindPickButtons(box);
   box.querySelectorAll("[data-pick-existing]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -942,7 +1072,7 @@ function renderPhaseCatalog() {
         <div>
           <label class="text-[11px] text-ink-faint" for="phase-create-from">From</label>
           <div class="flex gap-1 items-center mt-0.5">
-            <input id="phase-create-from" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
+            <input id="phase-create-from" class="input py-1.5 text-sm" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.fromYear)}" />
             <select id="phase-create-from-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
               <option value="ac" ${fromEra === "ac" ? "selected" : ""}>AC</option>
               <option value="bc" ${fromEra === "bc" ? "selected" : ""}>BC</option>
@@ -952,7 +1082,7 @@ function renderPhaseCatalog() {
         <div>
           <label class="text-[11px] text-ink-faint" for="phase-create-to">To</label>
           <div class="flex gap-1 items-center mt-0.5">
-            <input id="phase-create-to" class="input py-1.5 text-sm" inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
+            <input id="phase-create-to" class="input py-1.5 text-sm" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(defs.toYear)}" />
             <select id="phase-create-to-era" class="input py-1.5 text-sm w-[4.5rem] shrink-0">
               <option value="ac" ${toEra === "ac" ? "selected" : ""}>AC</option>
               <option value="bc" ${toEra === "bc" ? "selected" : ""}>BC</option>
@@ -967,6 +1097,7 @@ function renderPhaseCatalog() {
     </div>`;
   }
   box.innerHTML = html;
+  bindYearInputs(box);
   box.querySelectorAll("[data-pick-existing]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const ent = hubs.phase.find((x) => x.id === btn.dataset.pickExisting);
@@ -1249,7 +1380,7 @@ function renderSavedCountryCatalog({ boxId, searchId, excludeNames = [], onPick,
 
   let html = "";
   if (places.length) {
-    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Your countries</p>`;
+    html += `<p class="text-[10px] uppercase tracking-wider text-ink-faint font-semibold px-2 pt-1.5 pb-0.5">Countries</p>`;
     html += places
       .map((p) => {
         const flag = savedCountryFlag(p);
@@ -1263,16 +1394,16 @@ function renderSavedCountryCatalog({ boxId, searchId, excludeNames = [], onPick,
       })
       .join("");
   } else if (!q) {
-    html += `<p class="text-xs text-ink-faint px-2 py-2">No countries yet — type a name to add one.</p>`;
+    html += `<p class="text-xs text-ink-faint px-2 py-2">No countries yet — type a name to create one.</p>`;
   } else {
-    html += `<p class="text-xs text-ink-faint px-2 py-2">No matches in your countries.</p>`;
+    html += `<p class="text-xs text-ink-faint px-2 py-2">No matches. Create this name to add it to Countries.</p>`;
   }
 
   if (canCreate) {
     html += `
     <button type="button" data-create-country="${escapeHtml(qRaw)}"
       class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-accent-soft text-sm text-accent-dark font-medium border-t border-paper-line mt-1">
-      ${mode === "fill" ? "Use" : "Add"} “${escapeHtml(qRaw)}”
+      + Create “${escapeHtml(qRaw)}”
     </button>`;
   }
 
@@ -1281,7 +1412,18 @@ function renderSavedCountryCatalog({ boxId, searchId, excludeNames = [], onPick,
     btn.addEventListener("click", () => onPick(btn.dataset.pickCountry));
   });
   box.querySelectorAll("[data-create-country]").forEach((btn) => {
-    btn.addEventListener("click", () => onPick(btn.dataset.createCountry));
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.createCountry;
+      btn.disabled = true;
+      try {
+        await ensurePlacesForNames([name]);
+        await onPick(canonicalPlaceTitle(name));
+      } catch (err) {
+        toast(err.message || "Could not create country");
+      } finally {
+        btn.disabled = false;
+      }
+    });
   });
 }
 
@@ -1773,12 +1915,12 @@ function eventCountriesBlockHtml() {
   return `
     <div>
       <label class="label" for="qa-country-input">Countries / territories</label>
-      <p class="text-xs text-ink-faint -mt-1">Pick from your countries or type a new name — e.g. Germany, France, Rome.</p>
+      <p class="text-xs text-ink-faint -mt-1">Search the Countries hub, or create a new one — it is saved there for reuse.</p>
       <div class="flex gap-2">
         <input id="qa-country-input" class="input flex-1" maxlength="500" placeholder="Search or type a country…" autocomplete="off" />
         <button type="button" id="qa-country-add" class="btn-secondary px-3 shrink-0">Add</button>
       </div>
-      <div id="qa-country-catalog" class="mt-2 max-h-40 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
+      <div id="qa-country-catalog" class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
       <div id="qa-country-chips" class="flex flex-wrap gap-1.5 mt-2 min-h-[1.5rem]"></div>
     </div>`;
 }
@@ -1813,7 +1955,7 @@ function bindEventCountryHandlers(countries) {
       boxId: "qa-country-catalog",
       searchId: "qa-country-input",
       excludeNames: countries,
-      onPick: (name) => {
+      onPick: async (name) => {
         if (!name) return;
         if (countries.some((c) => c.toLowerCase() === name.toLowerCase())) {
           toast("Already added");
@@ -1828,7 +1970,7 @@ function bindEventCountryHandlers(countries) {
     });
   }
 
-  function addCountry() {
+  async function addCountry() {
     const input = document.getElementById("qa-country-input");
     const val = input?.value.trim();
     if (!val) return;
@@ -1836,10 +1978,15 @@ function bindEventCountryHandlers(countries) {
       toast("Already added");
       return;
     }
-    countries.push(val);
-    if (input) input.value = "";
-    renderEventCountryChips(countries);
-    refreshCatalog();
+    try {
+      await ensurePlacesForNames([val]);
+      countries.push(canonicalPlaceTitle(val));
+      if (input) input.value = "";
+      renderEventCountryChips(countries);
+      refreshCatalog();
+    } catch (err) {
+      toast(err.message || "Could not create country");
+    }
   }
   document.getElementById("qa-country-add")?.addEventListener("click", addCountry);
   document.getElementById("qa-country-input")?.addEventListener("keydown", (e) => {
@@ -1849,6 +1996,7 @@ function bindEventCountryHandlers(countries) {
     }
   });
   document.getElementById("qa-country-input")?.addEventListener("input", refreshCatalog);
+  document.getElementById("qa-country-input")?.addEventListener("focus", refreshCatalog);
   renderEventCountryChips(countries);
   refreshCatalog();
 }
@@ -1877,7 +2025,7 @@ function renderTagChips(tags) {
   });
 }
 
-function periodDateBlock(fromParts, toParts = null) {
+function periodDateBlock(fromParts, toParts = null, { ongoing = false } = {}) {
   const to = toParts || { year: "", month: "", day: "", era: fromParts.era || "ac" };
   return `
     <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
@@ -1890,7 +2038,7 @@ function periodDateBlock(fromParts, toParts = null) {
         <div class="grid grid-cols-3 gap-2">
           <input id="qa-from-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(fromParts.day)}" />
           <input id="qa-from-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(fromParts.month)}" />
-          <input id="qa-from-year" class="input" type="number" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
+          <input id="qa-from-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
         </div>
         <div class="flex gap-3 mt-1.5">
           <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
@@ -1906,7 +2054,7 @@ function periodDateBlock(fromParts, toParts = null) {
         <div class="grid grid-cols-3 gap-2">
           <input id="qa-to-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(to.day)}" />
           <input id="qa-to-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(to.month)}" />
-          <input id="qa-to-year" class="input" type="number" placeholder="Year" value="${escapeHtml(to.year)}" />
+          <input id="qa-to-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
         </div>
         <div class="flex gap-3 mt-1.5">
           <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
@@ -1916,6 +2064,7 @@ function periodDateBlock(fromParts, toParts = null) {
             <input type="radio" name="qa-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
           </label>
         </div>
+        ${untilNowCheckboxHtml("qa-ongoing", ongoing)}
       </div>
     </div>
   `;
@@ -2117,7 +2266,7 @@ export async function openQuickAdd({
       <div id="wizard-step-2" class="space-y-4 hidden">
         <div>
           <p id="belong-hint" class="text-xs text-ink-faint mt-0 mb-2">Enter dates to auto-map, or search to add periods and phases.</p>
-          ${periodDateBlock(dateParts, dateEndParts)}
+          ${periodDateBlock(dateParts, dateEndParts, { ongoing: Boolean(isEdit && editEntity?.ongoing) })}
           <div class="mt-3 space-y-3">
             ${belongStep("period", "", "Periods", "Search periods, or type a name to create…", "max-h-40")}
             ${belongStep("phase", "", "Phases", "Search phases, or type a name to create…", "max-h-40")}
@@ -2235,6 +2384,14 @@ export async function openQuickAdd({
   renderRelatedChips();
   renderAttachments();
   bindMediaHandlers();
+  bindYearInputs(panel);
+  bindUntilNowControl("qa-ongoing", {
+    inputIds: ["qa-to-day", "qa-to-month", "qa-to-year"],
+    radioNames: ["qa-to-era"],
+  });
+  document.getElementById("qa-ongoing")?.addEventListener("change", () => {
+    onEventDateFieldsChanged();
+  });
   renderTagChips(tags);
   showWizardStep(1);
   openModal();
@@ -2272,18 +2429,15 @@ export async function openQuickAdd({
     }
   });
 
-  document.getElementById("qa-from-year")?.addEventListener("change", () => {
-    onEventDateFieldsChanged();
-  });
-  document.getElementById("qa-from-year")?.addEventListener("blur", () => {
-    onEventDateFieldsChanged();
-  });
-  document.getElementById("qa-to-year")?.addEventListener("change", () => {
-    onEventDateFieldsChanged();
-  });
-  document.getElementById("qa-to-year")?.addEventListener("blur", () => {
-    onEventDateFieldsChanged();
-  });
+  ["qa-from-year", "qa-from-month", "qa-from-day", "qa-to-year", "qa-to-month", "qa-to-day"].forEach(
+    (id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener("input", () => onEventDateFieldsChanged());
+      el.addEventListener("change", () => onEventDateFieldsChanged());
+      el.addEventListener("blur", () => onEventDateFieldsChanged());
+    }
+  );
   document.querySelectorAll('input[name="qa-from-era"], input[name="qa-to-era"]').forEach((el) => {
     el.addEventListener("change", () => {
       const cleared = clearPeriodIfEraMismatch();
@@ -2306,7 +2460,8 @@ export async function openQuickAdd({
     }
 
     const from = readEventDateSide("qa-from");
-    const to = readEventDateSide("qa-to");
+    const ongoing = isUntilNow("qa-ongoing");
+    const to = ongoing ? { stored: null, signed: presentYear(), error: null } : readEventDateSide("qa-to");
     if (from.error) {
       toast(from.error);
       return;
@@ -2319,7 +2474,7 @@ export async function openQuickAdd({
       toast("From must be earlier than To");
       return;
     }
-    if (to.stored && !from.stored) {
+    if (!ongoing && to.stored && !from.stored) {
       toast("Set From before To");
       return;
     }
@@ -2348,7 +2503,8 @@ export async function openQuickAdd({
       title: document.getElementById("qa-title").value.trim(),
       summary: document.getElementById("qa-note").value.trim() || null,
       date_start: from.stored,
-      date_end: to.stored,
+      date_end: ongoing ? null : to.stored,
+      ongoing,
       tags: [...tags],
       place_name: document.getElementById("qa-place-name").value.trim() || null,
       place_url: document.getElementById("qa-place-url").value.trim() || null,
@@ -2401,14 +2557,14 @@ export async function openEditEvent(entityId, { onSaved } = {}) {
 }
 
 /** Single optional date block (day / month / year + era). */
-function figureSingleDateHtml(prefix, label, parts) {
+function figureSingleDateHtml(prefix, label, parts, { ongoingId = "", ongoing = false } = {}) {
   return `
     <div>
       <p class="text-xs font-medium text-ink-muted mb-1">${label}</p>
       <div class="grid grid-cols-3 gap-2">
         <input id="${prefix}-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(parts.day)}" />
         <input id="${prefix}-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(parts.month)}" />
-        <input id="${prefix}-year" class="input" type="number" placeholder="Year" value="${escapeHtml(parts.year)}" />
+        <input id="${prefix}-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(parts.year)}" />
       </div>
       <div class="flex gap-3 mt-1.5">
         <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
@@ -2418,17 +2574,18 @@ function figureSingleDateHtml(prefix, label, parts) {
           <input type="radio" name="${prefix}-era" value="bc" ${parts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
         </label>
       </div>
+      ${ongoingId ? untilNowCheckboxHtml(ongoingId, ongoing) : ""}
     </div>`;
 }
 
-function figureDatesFormHtml({ birth, death, reignFrom, reignTo }) {
+function figureDatesFormHtml({ birth, death, reignFrom, reignTo, ongoing = false }) {
   return `
     <div class="space-y-4">
       <div>
         <label class="label">Life dates <span class="font-normal text-ink-faint">(optional)</span></label>
         <div class="grid sm:grid-cols-2 gap-3 mt-1">
           ${figureSingleDateHtml("fig-birth", "Birth", birth)}
-          ${figureSingleDateHtml("fig-death", "Death", death)}
+          ${figureSingleDateHtml("fig-death", "Death", death, { ongoingId: "fig-ongoing", ongoing })}
         </div>
       </div>
       <div class="rounded-lg border border-paper-line bg-paper-deep/30 p-2.5 space-y-3">
@@ -2454,7 +2611,10 @@ function readFigureOptionalDate(prefix, label) {
 function readFigureFormDates() {
   const birth = readFigureOptionalDate("fig-birth", "birth");
   if (birth.error) return birth;
-  const death = readFigureOptionalDate("fig-death", "death");
+  const ongoing = isUntilNow("fig-ongoing");
+  const death = ongoing
+    ? { stored: null }
+    : readFigureOptionalDate("fig-death", "death");
   if (death.error) return death;
   const reignFrom = readFigureOptionalDate("fig-reign-from", "ruling start");
   if (reignFrom.error) return reignFrom;
@@ -2462,7 +2622,8 @@ function readFigureFormDates() {
   if (reignTo.error) return reignTo;
   return {
     date_start: birth.stored,
-    date_end: death.stored,
+    date_end: ongoing ? null : death.stored,
+    ongoing,
     reign_start: reignFrom.stored,
     reign_end: reignTo.stored,
   };
@@ -2472,9 +2633,9 @@ function figureCountryFieldHtml(value = "") {
   return `
     <div>
       <label class="label" for="fig-country">Country / territory <span class="font-normal text-ink-faint">(optional)</span></label>
-      <p class="text-xs text-ink-faint -mt-1">Pick from your countries or type a new name — modern or historic.</p>
+      <p class="text-xs text-ink-faint -mt-1">Search the Countries hub, or create a new one — it is saved there for reuse.</p>
       <input id="fig-country" class="input" maxlength="500" placeholder="Search or type a country…" value="${escapeHtml(value)}" autocomplete="off" />
-      <div id="fig-country-catalog" class="mt-2 max-h-40 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
+      <div id="fig-country-catalog" class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
     </div>`;
 }
 
@@ -2493,7 +2654,16 @@ function bindFigureCountryHandlers() {
     });
   }
   document.getElementById("fig-country")?.addEventListener("input", refreshCatalog);
+  document.getElementById("fig-country")?.addEventListener("focus", refreshCatalog);
   refreshCatalog();
+}
+
+function bindFigureDateControls() {
+  bindYearInputs(document.getElementById("modal-panel"));
+  bindUntilNowControl("fig-ongoing", {
+    inputIds: ["fig-death-day", "fig-death-month", "fig-death-year"],
+    radioNames: ["fig-death-era"],
+  });
 }
 
 function bindFigureFormSubmit(formId, onSubmit) {
@@ -2569,6 +2739,7 @@ export async function openAddFigure({ onSaved } = {}) {
   renderAttachments();
   bindMediaHandlers();
   bindFigureCountryHandlers();
+  bindFigureDateControls();
   bindFigureFormSubmit("fig-add-form", async (payload) => {
     try {
       const countryName = payload.place_name || "";
@@ -2679,7 +2850,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         <label class="label" for="fig-body">Full biography</label>
         <textarea id="fig-body" class="textarea min-h-[100px]" placeholder="Longer notes (markdown)…">${escapeHtml(figure.body || "")}</textarea>
       </div>
-      ${figureDatesFormHtml({ birth, death, reignFrom, reignTo })}
+      ${figureDatesFormHtml({ birth, death, reignFrom, reignTo, ongoing: Boolean(figure.ongoing) })}
       ${figureCountryFieldHtml(countryName)}
       ${categorySelectHtml(userCategories, figure.category || "", { error: categoriesError })}
       ${mediaBlockHtml()}
@@ -2710,6 +2881,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
   renderAttachments();
   bindMediaHandlers();
   bindFigureCountryHandlers();
+  bindFigureDateControls();
 
   function renderPeopleChips() {
     const box = document.getElementById("fig-people-chips");
@@ -2811,6 +2983,7 @@ export async function openEditFigure(figure, { onSaved } = {}) {
         body: document.getElementById("fig-body").value.trim() || null,
         date_start: dates.date_start,
         date_end: dates.date_end,
+        ongoing: dates.ongoing,
         reign_start: dates.reign_start,
         reign_end: dates.reign_end,
         place_name: countryName,
@@ -2870,7 +3043,7 @@ export async function openEditPeriod(period, { onSaved } = {}) {
         <div>
           <label class="label" for="period-from-year">From</label>
           <div class="flex gap-2 items-center">
-            <input id="period-from-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
+            <input id="period-from-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
@@ -2878,10 +3051,11 @@ export async function openEditPeriod(period, { onSaved } = {}) {
         <div>
           <label class="label" for="period-to-year">To</label>
           <div class="flex gap-2 items-center">
-            <input id="period-to-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
+            <input id="period-to-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="period-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
+          ${untilNowCheckboxHtml("period-ongoing", Boolean(period.ongoing))}
         </div>
       </div>
       <div class="flex justify-end gap-2 pt-2">
@@ -2891,6 +3065,11 @@ export async function openEditPeriod(period, { onSaved } = {}) {
     </form>
   `;
   openModal();
+  bindFormYearInputs("period-form");
+  bindUntilNowControl("period-ongoing", {
+    inputIds: ["period-to-year"],
+    radioNames: ["period-to-era"],
+  });
   document.getElementById("period-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const title = document.getElementById("period-title").value.trim();
@@ -2901,15 +3080,16 @@ export async function openEditPeriod(period, { onSaved } = {}) {
     const fromEra = document.querySelector('input[name="period-from-era"]:checked')?.value || "ac";
     const toEra = document.querySelector('input[name="period-to-era"]:checked')?.value || "ac";
     const fromYear = document.getElementById("period-from-year").value.trim();
+    const ongoing = isUntilNow("period-ongoing");
     const toYear = document.getElementById("period-to-year").value.trim();
-    if (!fromYear || !toYear) {
-      toast("Set both From and To years");
+    if (!fromYear || (!ongoing && !toYear)) {
+      toast(ongoing ? "Set a From year" : "Set both From and To years");
       return;
     }
     const date_start = composeDate(fromYear, null, null, fromEra);
-    const date_end = composeDate(toYear, null, null, toEra);
+    const date_end = ongoing ? null : composeDate(toYear, null, null, toEra);
     const startN = storedToSignedYear(date_start);
-    const endN = storedToSignedYear(date_end);
+    const endN = ongoing ? presentYear() : storedToSignedYear(date_end);
     if (startN != null && endN != null && startN > endN) {
       toast("From must be earlier than To");
       return;
@@ -2920,6 +3100,7 @@ export async function openEditPeriod(period, { onSaved } = {}) {
         summary: document.getElementById("period-summary").value.trim() || null,
         date_start,
         date_end,
+        ongoing,
       });
       toast(`Updated “${saved.title}”`);
       closeModal();
@@ -3098,7 +3279,7 @@ export async function openAddPhase({
   } catch {
     hubs.period = hubs.period || [];
   }
-
+  await loadSavedCountries();
   const seed = linkEvent || preselectPeriod;
   const from = seed?.date_start
     ? splitDateParts(seed.date_start)
@@ -3142,7 +3323,7 @@ export async function openAddPhase({
         <div>
           <label class="label" for="add-phase-from">From</label>
           <div class="flex gap-2 items-center">
-            <input id="add-phase-from" class="input" inputmode="numeric" placeholder="Year" required value="${escapeHtml(from.year)}" />
+            <input id="add-phase-from" class="input" data-year-input inputmode="numeric" placeholder="Year" required value="${escapeHtml(from.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
@@ -3150,12 +3331,14 @@ export async function openAddPhase({
         <div>
           <label class="label" for="add-phase-to">To</label>
           <div class="flex gap-2 items-center">
-            <input id="add-phase-to" class="input" inputmode="numeric" placeholder="Year" required value="${escapeHtml(to.year)}" />
+            <input id="add-phase-to" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="add-phase-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
+          ${untilNowCheckboxHtml("add-phase-ongoing", false)}
         </div>
       </div>
+      ${phaseCountryFieldHtml()}
       <div class="flex justify-end gap-2 pt-1">
         <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
         <button type="submit" class="btn-primary px-5 py-2.5">Create phase</button>
@@ -3163,6 +3346,12 @@ export async function openAddPhase({
     </form>
   `;
   openModal();
+  bindFormYearInputs("add-phase-form");
+  bindUntilNowControl("add-phase-ongoing", {
+    inputIds: ["add-phase-to"],
+    radioNames: ["add-phase-to-era"],
+  });
+  bindPhaseCountryField();
   queueMicrotask(() => document.getElementById("add-phase-name")?.focus());
 
   document.getElementById("add-phase-form").addEventListener("submit", async (ev) => {
@@ -3175,15 +3364,16 @@ export async function openAddPhase({
     const fromEra = document.querySelector('input[name="add-phase-from-era"]:checked')?.value || "ac";
     const toEra = document.querySelector('input[name="add-phase-to-era"]:checked')?.value || "ac";
     const fromYear = document.getElementById("add-phase-from")?.value.trim();
+    const ongoing = isUntilNow("add-phase-ongoing");
     const toYear = document.getElementById("add-phase-to")?.value.trim();
-    if (!fromYear || !toYear) {
-      toast("Set both From and To years");
+    if (!fromYear || (!ongoing && !toYear)) {
+      toast(ongoing ? "Set a From year" : "Set both From and To years");
       return;
     }
     const date_start = composeDate(fromYear, null, null, fromEra);
-    const date_end = composeDate(toYear, null, null, toEra);
+    const date_end = ongoing ? null : composeDate(toYear, null, null, toEra);
     const startN = storedToSignedYear(date_start);
-    const endN = storedToSignedYear(date_end);
+    const endN = ongoing ? presentYear() : storedToSignedYear(date_end);
     if (startN != null && endN != null && startN > endN) {
       toast("From must be earlier than To");
       return;
@@ -3202,6 +3392,7 @@ export async function openAddPhase({
       }
     }
 
+    const country = await resolvePhaseCountry();
     try {
       const saved = await api.createEntity({
         type: "phase",
@@ -3210,11 +3401,14 @@ export async function openAddPhase({
         body: null,
         date_start,
         date_end,
+        ongoing,
         parent_id: null,
         tags: [],
         attachments: [],
+        country_names: country.country_names,
+        country_name: country.country_name,
         period_ids: [...periodIdSet],
-        country_ids: [],
+        country_ids: country.country_ids,
         figure_ids: [],
         link_ids: [],
       });
@@ -3262,6 +3456,8 @@ export async function openEditPhase(phase, { onSaved } = {}) {
   } catch {
     hubs.period = hubs.period || [];
   }
+  await loadSavedCountries();
+  const phaseCountry = formatCountryNames(phase)[0] || "";
   const panel = document.getElementById("modal-panel");
   panel.innerHTML = `
     <div class="flex items-start justify-between mb-4">
@@ -3284,7 +3480,7 @@ export async function openEditPhase(phase, { onSaved } = {}) {
         <div>
           <label class="label" for="phase-from-year">From</label>
           <div class="flex gap-2 items-center">
-            <input id="phase-from-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
+            <input id="phase-from-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(from.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-from-era" value="ac" ${from.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-from-era" value="bc" ${from.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
@@ -3292,12 +3488,14 @@ export async function openEditPhase(phase, { onSaved } = {}) {
         <div>
           <label class="label" for="phase-to-year">To</label>
           <div class="flex gap-2 items-center">
-            <input id="phase-to-year" class="input" inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
+            <input id="phase-to-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(to.year)}" />
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-to-era" value="ac" ${to.era !== "bc" ? "checked" : ""} /> AC</label>
             <label class="inline-flex items-center gap-1 text-xs"><input type="radio" name="phase-to-era" value="bc" ${to.era === "bc" ? "checked" : ""} /> BC</label>
           </div>
+          ${untilNowCheckboxHtml("phase-ongoing", Boolean(phase.ongoing))}
         </div>
       </div>
+      ${phaseCountryFieldHtml(phaseCountry)}
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
         <button type="submit" class="btn-primary px-5 py-2.5">Save phase</button>
@@ -3305,6 +3503,12 @@ export async function openEditPhase(phase, { onSaved } = {}) {
     </form>
   `;
   openModal();
+  bindFormYearInputs("phase-form");
+  bindUntilNowControl("phase-ongoing", {
+    inputIds: ["phase-to-year"],
+    radioNames: ["phase-to-era"],
+  });
+  bindPhaseCountryField();
   document.getElementById("phase-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const title = document.getElementById("phase-title").value.trim();
@@ -3315,19 +3519,21 @@ export async function openEditPhase(phase, { onSaved } = {}) {
     const fromEra = document.querySelector('input[name="phase-from-era"]:checked')?.value || "ac";
     const toEra = document.querySelector('input[name="phase-to-era"]:checked')?.value || "ac";
     const fromYear = document.getElementById("phase-from-year").value.trim();
+    const ongoing = isUntilNow("phase-ongoing");
     const toYear = document.getElementById("phase-to-year").value.trim();
-    if (!fromYear || !toYear) {
-      toast("Set both From and To years");
+    if (!fromYear || (!ongoing && !toYear)) {
+      toast(ongoing ? "Set a From year" : "Set both From and To years");
       return;
     }
     const date_start = composeDate(fromYear, null, null, fromEra);
-    const date_end = composeDate(toYear, null, null, toEra);
+    const date_end = ongoing ? null : composeDate(toYear, null, null, toEra);
     const startN = storedToSignedYear(date_start);
-    const endN = storedToSignedYear(date_end);
+    const endN = ongoing ? presentYear() : storedToSignedYear(date_end);
     if (startN != null && endN != null && startN > endN) {
       toast("From must be earlier than To");
       return;
     }
+    const country = await resolvePhaseCountry();
     const period_ids = autoAssignPeriodsForRange(startN, endN).map((p) => p.id);
     try {
       const saved = await api.updateEntity(phase.id, {
@@ -3335,6 +3541,10 @@ export async function openEditPhase(phase, { onSaved } = {}) {
         summary: document.getElementById("phase-summary").value.trim() || null,
         date_start,
         date_end,
+        ongoing,
+        country_names: country.country_names,
+        country_name: country.country_name,
+        country_ids: country.country_ids,
         period_ids,
       });
       toast(`Updated “${saved.title}”`);
@@ -3386,11 +3596,9 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
     toast("Could not open form");
     return;
   }
-  const parentRange =
-    formatRange(parent.date_start, parent.date_end) ||
-    (parent.date_start ? formatRange(parent.date_start, null) : "");
+  const parentRange = formatEntityRange(parent) || formatDate(parent.date_start) || "";
   const parentStart = storedToSignedYear(parent.date_start);
-  const parentEnd = storedToSignedYear(parent.date_end) ?? parentStart;
+  const parentEnd = effectiveEndYear(parent) ?? parentStart;
   const fromParts = isEdit ? splitDateParts(milestone.date_start) : { year: "", month: "", day: "", era: "ac" };
   const toParts = isEdit
     ? splitDateParts(milestone.date_end)
@@ -3422,7 +3630,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
           <div class="grid grid-cols-3 gap-2">
             <input id="ms-from-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(fromParts.day)}" />
             <input id="ms-from-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(fromParts.month)}" />
-            <input id="ms-from-year" class="input" type="number" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
+            <input id="ms-from-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(fromParts.year)}" />
           </div>
           <div class="flex gap-3 mt-1.5">
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
@@ -3438,7 +3646,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
           <div class="grid grid-cols-3 gap-2">
             <input id="ms-to-day" class="input" type="number" min="1" max="31" placeholder="Day" value="${escapeHtml(toParts.day)}" />
             <input id="ms-to-month" class="input" type="number" min="1" max="12" placeholder="Month" value="${escapeHtml(toParts.month)}" />
-            <input id="ms-to-year" class="input" type="number" placeholder="Year" value="${escapeHtml(toParts.year)}" />
+            <input id="ms-to-year" class="input" data-year-input inputmode="numeric" placeholder="Year" value="${escapeHtml(toParts.year)}" />
           </div>
           <div class="flex gap-3 mt-1.5">
             <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
@@ -3448,6 +3656,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
               <input type="radio" name="ms-to-era" value="bc" ${toParts.era === "bc" ? "checked" : ""} class="accent-accent" /> BC
             </label>
           </div>
+          ${untilNowCheckboxHtml("ms-ongoing", Boolean(isEdit && milestone?.ongoing))}
         </div>
       </div>
       <div class="flex justify-end gap-2 pt-1">
@@ -3457,6 +3666,11 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
     </form>
   `;
   openModal();
+  bindFormYearInputs("milestone-form");
+  bindUntilNowControl("ms-ongoing", {
+    inputIds: ["ms-to-day", "ms-to-month", "ms-to-year"],
+    radioNames: ["ms-to-era"],
+  });
   queueMicrotask(() => document.getElementById("ms-title")?.focus());
 
   document.getElementById("milestone-form").addEventListener("submit", async (ev) => {
@@ -3468,6 +3682,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
     }
     const fromEra = document.querySelector('input[name="ms-from-era"]:checked')?.value || "ac";
     const toEra = document.querySelector('input[name="ms-to-era"]:checked')?.value || "ac";
+    const ongoing = isUntilNow("ms-ongoing");
     const fromY = document.getElementById("ms-from-year")?.value.trim();
     const fromM = document.getElementById("ms-from-month")?.value;
     const fromD = document.getElementById("ms-from-day")?.value;
@@ -3478,19 +3693,19 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
       toast("Add a From year if you set month or day");
       return;
     }
-    if ((toM || toD) && !toY) {
+    if (!ongoing && (toM || toD) && !toY) {
       toast("Add a To year if you set month or day");
       return;
     }
     const date_start = composeDate(fromY || null, fromM, fromD, fromEra);
-    const date_end = composeDate(toY || null, toM, toD, toEra);
+    const date_end = ongoing ? null : composeDate(toY || null, toM, toD, toEra);
     const startN = storedToSignedYear(date_start);
-    const endN = storedToSignedYear(date_end);
+    const endN = ongoing ? presentYear() : storedToSignedYear(date_end);
     if (startN != null && endN != null && startN > endN) {
       toast("From must be earlier than To");
       return;
     }
-    if (date_end && !date_start) {
+    if (!ongoing && date_end && !date_start) {
       toast("Set From before To");
       return;
     }
@@ -3520,6 +3735,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
           summary,
           date_start,
           date_end,
+          ongoing,
         });
         toast(`Updated “${saved.title}”`);
       } else {
@@ -3530,6 +3746,7 @@ async function openMilestoneForm({ milestone = null, parentEvent, onSaved } = {}
           body: null,
           date_start,
           date_end,
+          ongoing,
           parent_id: parent.id,
           tags: [],
           attachments: [],

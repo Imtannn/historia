@@ -23,11 +23,46 @@ export function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/** Digits from a year field that may include commas (1,000 → 1000). */
+export function parseYearDigits(raw) {
+  const digits = String(raw ?? "").replace(/[^\d]/g, "");
+  if (!digits) return null;
+  const n = parseInt(digits, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Current calendar year (always AC). */
+export function presentYear() {
+  return new Date().getFullYear();
+}
+
+/** End year for overlap / bands: Present when ongoing. */
+export function effectiveEndYear(entityOrEnd, ongoingFlag = false) {
+  if (entityOrEnd && typeof entityOrEnd === "object") {
+    if (entityOrEnd.ongoing) return presentYear();
+    return storedToSignedYear(entityOrEnd.date_end);
+  }
+  if (ongoingFlag) return presentYear();
+  return storedToSignedYear(entityOrEnd);
+}
+
+/** Inclusive overlap on the signed year line. */
+export function rangesOverlap(a0, a1, b0, b1) {
+  if (a0 == null || b0 == null) return false;
+  const aHi = a1 == null ? a0 : a1;
+  const bHi = b1 == null ? b0 : b1;
+  const loA = Math.min(a0, aHi);
+  const hiA = Math.max(a0, aHi);
+  const loB = Math.min(b0, bHi);
+  const hiB = Math.max(b0, bHi);
+  return loA <= hiB && loB <= hiA;
+}
+
 /** Build stored date string from form parts. era: "bc" | "ac" */
 export function composeDate(year, month, day, era = "ac") {
   if (year == null || String(year).trim() === "") return null;
-  let y = parseInt(String(year).trim(), 10);
-  if (Number.isNaN(y)) return null;
+  let y = parseYearDigits(year);
+  if (y == null) return null;
   y = Math.abs(y);
 
   let m = null;
@@ -134,11 +169,42 @@ export function formatSignedYear(year) {
   return n < 0 ? `${label} BC` : `${label} AC`;
 }
 
-export function formatRange(start, end) {
+export function formatRange(start, end, { ongoing = false } = {}) {
   const a = formatDate(start);
-  const b = formatDate(end);
+  const b = ongoing ? "Present" : formatDate(end);
   if (a && b) return `${a} – ${b}`;
+  if (ongoing && a) return `${a} – Present`;
   return a || b || "";
+}
+
+/** From–To (or Present) for an entity that may be ongoing. */
+export function formatEntityRange(entity) {
+  if (!entity) return "";
+  return (
+    formatRange(entity.date_start, entity.date_end, { ongoing: Boolean(entity.ongoing) }) ||
+    formatDate(entity.date_start)
+  );
+}
+
+/** Live comma formatting on year text inputs; stored values stay plain digits. */
+export function bindYearInput(el) {
+  if (!el || el.dataset.yearBound) return;
+  el.dataset.yearBound = "1";
+  el.setAttribute("inputmode", "numeric");
+  el.setAttribute("autocomplete", "off");
+  if (el.getAttribute("type") === "number") el.setAttribute("type", "text");
+  const format = () => {
+    const n = parseYearDigits(el.value);
+    if (n != null) el.value = formatYearNumber(n);
+    else el.value = String(el.value || "").replace(/[^\d,]/g, "");
+  };
+  el.addEventListener("input", format);
+  el.addEventListener("blur", format);
+  format();
+}
+
+export function bindYearInputs(root = document) {
+  root.querySelectorAll("[data-year-input]").forEach(bindYearInput);
 }
 
 /** Signed year (negative = BC) → stored Historia date string. */
