@@ -58,6 +58,18 @@ export function rangesOverlap(a0, a1, b0, b1) {
   return loA <= hiB && loB <= hiA;
 }
 
+/** True when [inner0, inner1] lies entirely inside [outer0, outer1] (inclusive). */
+export function rangesEnclosed(inner0, inner1, outer0, outer1) {
+  if (inner0 == null || outer0 == null) return false;
+  const iHi = inner1 == null ? inner0 : inner1;
+  const oHi = outer1 == null ? outer0 : outer1;
+  const loI = Math.min(inner0, iHi);
+  const hiI = Math.max(inner0, iHi);
+  const loO = Math.min(outer0, oHi);
+  const hiO = Math.max(outer0, oHi);
+  return loI >= loO && hiI <= hiO;
+}
+
 /** Build stored date string from form parts. era: "bc" | "ac" */
 export function composeDate(year, month, day, era = "ac") {
   if (year == null || String(year).trim() === "") return null;

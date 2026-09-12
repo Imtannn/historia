@@ -215,6 +215,18 @@ def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and a[1] > b[0]
 
 
+def _range_enclosed(inner: tuple[int, int], outer: tuple[int, int]) -> bool:
+    """True when inner lies entirely inside outer (inclusive endpoints)."""
+    return inner[0] >= outer[0] and inner[1] <= outer[1]
+
+
+def _entity_country_keys(entity: Entity) -> set[str]:
+    return {
+        name.lower()
+        for name in _normalize_country_names(entity.country_names, entity.country_name)
+    }
+
+
 _DURING_TIME_TYPES = (
     EntityType.event,
     EntityType.milestone,
@@ -224,12 +236,54 @@ _DURING_TIME_TYPES = (
 )
 
 
+def _collect_phase_events(
+    session: Session,
+    phase: Entity,
+    exclude_ids: Optional[set[str]] = None,
+) -> list[dict]:
+    """Events strictly enclosed in the phase window, optionally filtered by country."""
+    phase_range = _year_range(phase)
+    if phase_range is None:
+        return []
+
+    skip: set[str] = {phase.id}
+    if exclude_ids:
+        skip |= exclude_ids
+    for child in session.exec(select(Entity).where(Entity.parent_id == phase.id)).all():
+        skip.add(child.id)
+
+    want_countries = _entity_country_keys(phase)
+    events = list(session.exec(select(Entity).where(Entity.type == EntityType.event)).all())
+
+    results: list[dict] = []
+    for event in events:
+        if event.id in skip:
+            continue
+        event_range = _year_range(event)
+        if event_range is None or not _range_enclosed(event_range, phase_range):
+            continue
+        if want_countries and not (_entity_country_keys(event) & want_countries):
+            continue
+        results.append({"entity": _entity_read(event), "parent": None})
+
+    results.sort(
+        key=lambda item: (
+            date_sort_key(item["entity"].date_start),
+            item["entity"].title.lower(),
+        )
+    )
+    return results
+
+
 def _collect_during_time(
     session: Session,
     entity: Entity,
     exclude_ids: Optional[set[str]] = None,
 ) -> list[dict]:
-    """All dated notes from elsewhere whose timeline overlaps this entity's range."""
+    """Dated notes from elsewhere whose timeline overlaps this entity's range."""
+    if entity.type == EntityType.phase:
+        return _collect_phase_events(session, entity, exclude_ids)
+
     entity_ranges = _entity_time_ranges(entity)
     if not entity_ranges:
         return []

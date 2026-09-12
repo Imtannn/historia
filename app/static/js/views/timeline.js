@@ -10,7 +10,7 @@ import {
   formatEntityRange,
   formatSignedYear,
   effectiveEndYear,
-  rangesOverlap,
+  rangesEnclosed,
   storedToSignedYear,
   typeLabel,
 } from "../util.js";
@@ -807,14 +807,14 @@ function eventMatchesPhase(event, phase) {
   const e0 = storedToSignedYear(event?.date_start);
   if (e0 == null) return false;
   const e1 = effectiveEndYear(event) ?? e0;
-  if (!rangesOverlap(e0, e1, p0, p1)) return false;
+  if (!rangesEnclosed(e0, e1, p0, p1)) return false;
   const phaseCountries = formatCountryNames(phase).map((n) => n.toLowerCase());
   if (!phaseCountries.length) return true;
   const want = new Set(phaseCountries);
   return formatCountryNames(event).some((n) => want.has(n.toLowerCase()));
 }
 
-/** Events overlapping a phase window (optional country), not part_of links. */
+/** Events fully enclosed in a phase window (optional country), not part_of links. */
 function fetchPhaseEventItems(phaseEntities, datedEvents, worldLo, worldHi) {
   const phases = (phaseEntities || []).filter(Boolean);
   if (!phases.length || worldLo == null || worldHi == null) return [];

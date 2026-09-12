@@ -12,6 +12,9 @@ import {
   typeLabel,
   toast,
   compareByDateThenTitle,
+  effectiveEndYear,
+  rangesEnclosed,
+  storedToSignedYear,
 } from "../util.js";
 import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openEditCountry, openAddPhase, openAddMilestone, openEditMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
 
@@ -290,15 +293,34 @@ function mediaSectionHtml(attachments) {
     </section>`;
 }
 
-function duringTimeSectionHtml(items) {
+function eventFitsPhase(event, phase) {
+  const p0 = storedToSignedYear(phase?.date_start);
+  if (p0 == null) return false;
+  const p1 = effectiveEndYear(phase) ?? p0;
+  const e0 = storedToSignedYear(event?.date_start);
+  if (e0 == null) return false;
+  const e1 = effectiveEndYear(event) ?? e0;
+  if (!rangesEnclosed(e0, e1, p0, p1)) return false;
+  const want = new Set(formatCountryNames(phase).map((n) => n.toLowerCase()));
+  if (!want.size) return true;
+  return formatCountryNames(event).some((n) => want.has(n.toLowerCase()));
+}
+
+function duringTimeSectionHtml(items, { isPhase = false, countryNames = [] } = {}) {
   if (!items?.length) return "";
   const sorted = [...items].sort((a, b) =>
     compareByDateThenTitle(a.entity, b.entity)
   );
+  const countryLabel = (countryNames || []).join(", ");
+  const blurb = isPhase
+    ? countryLabel
+      ? `Events tagged ${escapeHtml(countryLabel)} whose dates fall entirely within this phase.`
+      : "Events whose dates fall entirely within this phase."
+    : "All your other notes whose dates fall within this range — events, moments, figures, phases, and periods from anywhere in your library.";
   return `
     <section class="mb-8">
       <h2 class="font-display text-xl mb-1">Events during this time</h2>
-      <p class="text-sm text-ink-muted mb-3">All your other notes whose dates fall within this range — events, moments, figures, phases, and periods from anywhere in your library.</p>
+      <p class="text-sm text-ink-muted mb-3">${blurb}</p>
       <div class="space-y-2">
         ${sorted
           .map((item) => {
@@ -586,13 +608,26 @@ function renderGenericHub(root, data, e, bodyHtml) {
           : "Library";
   const range = formatEntityRange(e) || formatDate(e.date_start);
   const related = { ...(data.related || {}) };
-  const eventItems = related.event || [];
+  const eventItems = (related.event || []).filter((item) =>
+    isPhase ? eventFitsPhase(item.entity, e) : true
+  );
   const phaseItems = related.phase || [];
+  const periodItems = related.period || [];
+  const countryNames = formatCountryNames(e);
   if (isPeriod || isPhase) delete related.event;
   if (isPeriod) delete related.phase;
+  if (isPhase) delete related.period;
   const topicRelated = isTopic ? orderedTopicRelated(related, e.body) : related;
   const groups = groupList(isTopic ? topicRelated : related);
   const attachments = e.attachments || [];
+  const periodBadges = isPhase
+    ? periodItems
+        .map((item) => {
+          const ent = item.entity;
+          return `<a href="#/entity/${ent.id}" class="type-badge no-underline normal-case tracking-normal font-medium hover:text-accent">${escapeHtml(ent.title)}</a>`;
+        })
+        .join("")
+    : "";
 
   root.innerHTML = `
     <div class="mb-2">
@@ -603,6 +638,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
       <div class="flex flex-wrap items-center gap-2 mb-2">
         <span class="type-badge">${typeLabel(e.type)}</span>
         ${range ? `<span class="text-sm text-ink-faint tabular-nums">${escapeHtml(range)}</span>` : ""}
+        ${isPhase && countryNames.length ? `<span class="text-sm text-ink-faint">${escapeHtml(countryNames.join(", "))}</span>` : ""}
+        ${periodBadges}
       </div>
       <h1 class="font-display text-3xl sm:text-4xl tracking-tight">${escapeHtml(e.title)}</h1>
       ${e.summary ? `<p class="text-lg text-ink-muted mt-3 max-w-2xl">${escapeHtml(e.summary)}</p>` : ""}
@@ -792,13 +829,14 @@ function renderGenericHub(root, data, e, bodyHtml) {
             </section>`
     }
 
-    ${duringTimeSectionHtml(data.during_time)}
+    ${duringTimeSectionHtml(data.during_time, { isPhase, countryNames })}
 
     ${
       isPeriod || isPhase
         ? groups
             .map((key) => {
               const items = related[key];
+              if (isPhase && key === "topic" && !items?.length) return "";
               return `
               <section class="mb-8">
                 <h2 class="font-display text-xl mb-3">${groupTitle(key)}</h2>
@@ -824,7 +862,10 @@ function renderGenericHub(root, data, e, bodyHtml) {
         : ""
     }
 
-    <section class="mb-8">
+    ${
+      isPhase
+        ? ""
+        : `<section class="mb-8">
       <h2 class="font-display text-xl mb-3">Referenced by</h2>
       ${
         (data.backlinks || []).length === 0
@@ -847,7 +888,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
                 .join("")}
             </div>`
       }
-    </section>
+    </section>`
+    }
   `;
 }
 
