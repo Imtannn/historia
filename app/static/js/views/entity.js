@@ -856,7 +856,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
     }
 
     ${
-      isPhase
+      isPhase || isPlace
         ? ""
         : `<section class="mb-8">
       <h2 class="font-display text-xl mb-3">Referenced by</h2>
