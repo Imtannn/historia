@@ -236,36 +236,53 @@ _DURING_TIME_TYPES = (
     EntityType.period,
 )
 
+_COVERED_TYPES = (EntityType.event, EntityType.milestone)
 
-def _collect_phase_events(
+
+def _country_keys_for_match(session: Session, entity: Entity) -> set[str]:
+    """Country tags used when locating an item in a phase/period. Moments inherit from their event."""
+    keys = _entity_country_keys(entity)
+    if keys or entity.type != EntityType.milestone or not entity.parent_id:
+        return keys
+    parent = session.get(Entity, entity.parent_id)
+    return _entity_country_keys(parent) if parent else set()
+
+
+def _collect_enclosed_events_and_milestones(
     session: Session,
-    phase: Entity,
-    exclude_ids: Optional[set[str]] = None,
+    container: Entity,
 ) -> list[dict]:
-    """Events strictly enclosed in the phase window, optionally filtered by country."""
-    phase_range = _year_range(phase)
-    if phase_range is None:
+    """Events and moments whose dates lie entirely inside this phase/period.
+
+    Country on the container is optional: if set, the item must share that country
+    (moments use the parent event's countries). Linked items are included — they
+    must not be skipped just because they also appear in `related`.
+    """
+    container_range = _year_range(container)
+    if container_range is None:
         return []
 
-    skip: set[str] = {phase.id}
-    if exclude_ids:
-        skip |= exclude_ids
-    for child in session.exec(select(Entity).where(Entity.parent_id == phase.id)).all():
-        skip.add(child.id)
-
-    want_countries = _entity_country_keys(phase)
-    events = list(session.exec(select(Entity).where(Entity.type == EntityType.event)).all())
+    skip: set[str] = {container.id}
+    want_countries = _entity_country_keys(container)
+    rows = list(
+        session.exec(select(Entity).where(Entity.type.in_(_COVERED_TYPES))).all()  # type: ignore[attr-defined]
+    )
 
     results: list[dict] = []
-    for event in events:
-        if event.id in skip:
+    for other in rows:
+        if other.id in skip:
             continue
-        event_range = _year_range(event)
-        if event_range is None or not _range_enclosed(event_range, phase_range):
+        other_range = _year_range(other)
+        if other_range is None or not _range_enclosed(other_range, container_range):
             continue
-        if want_countries and not (_entity_country_keys(event) & want_countries):
+        if want_countries and not (_country_keys_for_match(session, other) & want_countries):
             continue
-        results.append({"entity": _entity_read(event), "parent": None})
+        parent = None
+        if other.type == EntityType.milestone and other.parent_id:
+            p = session.get(Entity, other.parent_id)
+            if p:
+                parent = _entity_read(p)
+        results.append({"entity": _entity_read(other), "parent": parent})
 
     results.sort(
         key=lambda item: (
@@ -283,7 +300,7 @@ def _collect_during_time(
 ) -> list[dict]:
     """Dated notes from elsewhere whose timeline overlaps this entity's range."""
     if entity.type == EntityType.phase:
-        return _collect_phase_events(session, entity, exclude_ids)
+        return _collect_enclosed_events_and_milestones(session, entity)
 
     entity_ranges = _entity_time_ranges(entity)
     if not entity_ranges:
@@ -946,4 +963,9 @@ def entity_neighbors(entity_id: str, session: Session = Depends(get_session)) ->
         "backlinks": backlinks,
         "life_events": life_events,
         "during_time": _collect_during_time(session, entity, seen_in_related),
+        "covered": (
+            _collect_enclosed_events_and_milestones(session, entity)
+            if entity.type == EntityType.period
+            else []
+        ),
     }

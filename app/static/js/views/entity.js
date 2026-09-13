@@ -3,12 +3,15 @@
 import { api } from "../api.js";
 import {
   escapeHtml,
+  effectiveEndYear,
   formatDate,
   formatEntityRange,
   formatRange,
   formatCountryNames,
   isImageUrl,
+  rangesEnclosed,
   relationLabel,
+  storedToSignedYear,
   typeLabel,
   toast,
   compareByDateThenTitle,
@@ -36,6 +39,22 @@ function groupList(related) {
 
 function groupTitle(key, overrides = {}) {
   return overrides[key] || GROUP_TITLES[key] || typeLabel(key);
+}
+
+/** True when this phase/period fully covers the item's dates (and country, if both have one). */
+function eraCoversEntity(era, entity) {
+  const outer0 = storedToSignedYear(era?.date_start);
+  if (outer0 == null) return false;
+  const outer1 = effectiveEndYear(era) ?? outer0;
+  const inner0 = storedToSignedYear(entity?.date_start);
+  if (inner0 == null) return false;
+  const inner1 = effectiveEndYear(entity) ?? inner0;
+  if (!rangesEnclosed(inner0, inner1, outer0, outer1)) return false;
+  const eraCountries = formatCountryNames(era).map((n) => n.toLowerCase());
+  if (!eraCountries.length) return true;
+  const itemCountries = formatCountryNames(entity).map((n) => n.toLowerCase());
+  if (!itemCountries.length) return true;
+  return itemCountries.some((c) => eraCountries.includes(c));
 }
 
 const TOPIC_REORDER_KINDS = new Set(["event", "phase", "figure", "milestone"]);
@@ -297,8 +316,8 @@ function duringTimeSectionHtml(items, { isPhase = false, countryNames = [] } = {
   const countryLabel = (countryNames || []).join(", ");
   const blurb = isPhase
     ? countryLabel
-      ? `Events tagged ${escapeHtml(countryLabel)} whose dates fall entirely within this phase.`
-      : "Events whose dates fall entirely within this phase."
+      ? `Events and moments tagged ${escapeHtml(countryLabel)} whose dates fall entirely within this phase.`
+      : "Events and moments whose dates fall entirely within this phase."
     : "All your other notes whose dates fall within this range — events, moments, figures, phases, and periods from anywhere in your library.";
   if (!sorted.length) {
     if (!isPhase) return "";
@@ -411,7 +430,7 @@ function renderEventDetail(root, data, e, bodyHtml) {
   const range = formatEntityRange(e) || formatDate(e.date_start);
   const related = { ...(data.related || {}) };
   const milestones = related.milestone || [];
-  const phases = related.phase || [];
+  const phases = (related.phase || []).filter((item) => eraCoversEntity(item.entity, e));
   delete related.milestone;
   delete related.phase;
   const otherGroups = groupList(related);
@@ -606,6 +625,16 @@ function renderGenericHub(root, data, e, bodyHtml) {
   const periodItems = related.period || [];
   const countryNames = formatCountryNames(e);
   if (isPeriod || isPhase) delete related.event;
+  if (isPeriod) {
+    const byId = new Map(eventItems.map((item) => [item.entity.id, item]));
+    for (const item of data.covered || []) {
+      if (item?.entity?.id) byId.set(item.entity.id, item);
+    }
+    eventItems.length = 0;
+    eventItems.push(
+      ...[...byId.values()].sort((a, b) => compareByDateThenTitle(a.entity, b.entity))
+    );
+  }
   if (isPeriod) delete related.phase;
   if (isPhase) delete related.period;
   const topicRelated = isTopic ? orderedTopicRelated(related, e.body) : related;
@@ -757,12 +786,17 @@ function renderGenericHub(root, data, e, bodyHtml) {
                   .map((item) => {
                     const ent = item.entity;
                     const r = formatEntityRange(ent) || formatDate(ent.date_start);
+                    const fromParent = item.parent?.title
+                      ? `<span class="text-xs text-ink-faint">from ${escapeHtml(item.parent.title)}</span>`
+                      : "";
                     return `
                     <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 flex-wrap">
                           <span class="font-medium">${escapeHtml(ent.title)}</span>
+                          ${ent.type && ent.type !== "event" ? `<span class="type-badge">${typeLabel(ent.type)}</span>` : ""}
                           ${r ? `<span class="text-xs text-ink-faint">${escapeHtml(r)}</span>` : ""}
+                          ${fromParent}
                         </div>
                         ${ent.summary ? `<p class="text-sm text-ink-muted mt-0.5 line-clamp-1">${escapeHtml(ent.summary)}</p>` : ""}
                       </div>

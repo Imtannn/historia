@@ -345,9 +345,32 @@ function findNotebookPeriodsContaining(start, end = start, opts = {}) {
   return scoreNotebookEras(hubs.period || [], start, end, opts);
 }
 
-/** Notebook phases that best match [start, end]. */
+function selectedCountryKeys() {
+  return [...selectedBelong.country.values()]
+    .map((e) => String(e.title || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** True when the event range sits fully inside the phase and countries agree. */
+function phaseCoversEvent(phaseEntity, start, end, countryKeys) {
+  const meta = periodMetaFor(phaseEntity);
+  if (!meta || meta.start_year == null || meta.end_year == null) return false;
+  const r = normalizeYearRange(start, end);
+  if (!r) return false;
+  const plo = Math.min(meta.start_year, meta.end_year);
+  const phi = Math.max(meta.start_year, meta.end_year);
+  if (r.lo < plo || r.hi > phi) return false;
+  const eraCountries = formatCountryNames(phaseEntity).map((n) => n.toLowerCase());
+  if (!eraCountries.length || !countryKeys.length) return true;
+  return countryKeys.some((c) => eraCountries.includes(c));
+}
+
+/** Notebook phases that fully cover [start, end] (and match country when both have one). */
 function findNotebookPhasesContaining(start, end = start, opts = {}) {
-  return scoreNotebookEras(hubs.phase || [], start, end, opts);
+  const countryKeys = selectedCountryKeys();
+  return scoreNotebookEras(hubs.phase || [], start, end, opts).filter((h) =>
+    phaseCoversEvent(h.entity, start, end, countryKeys)
+  );
 }
 
 function collectPinned(kind) {
@@ -1295,6 +1318,7 @@ async function setPrimaryPlace(name, flagHint = "") {
     selectedBelong.country.set(created.id, created);
   }
   pruneEmpiresForPrimary();
+  autoAssignPeriodsFromEventDates();
   refreshBelongUI();
   return primaryPlace();
 }
@@ -1588,10 +1612,12 @@ async function pickFromCatalog(kind, name, flag) {
       const already = selectedEmpires().find((e) => e.title.toLowerCase() === name.toLowerCase());
       if (already) {
         selectedBelong.country.delete(already.id);
+        autoAssignPeriodsFromEventDates();
         refreshBelongUI();
         return;
       }
       await ensureEmpire(name, flag || "🏛️");
+      autoAssignPeriodsFromEventDates();
       refreshBelongUI();
       return;
     }
@@ -1704,7 +1730,7 @@ function mediaBlockHtml() {
   return `
     <div id="media-block" class="rounded-xl border border-dashed border-paper-line bg-paper-deep/20 p-3" tabindex="0">
       <label class="label">Media</label>
-      <p class="text-xs text-ink-faint -mt-1 mb-2">Click here and paste an image (Cmd+V), drop a file, paste a URL, or browse.</p>
+      <p class="text-xs text-ink-faint -mt-1 mb-2">Paste (Cmd+V), drop, or browse — every method saves the file the same way on the server.</p>
       <div class="flex flex-wrap gap-2">
         <input id="file-input" class="input flex-1 min-w-[12rem]" placeholder="Image URL…" />
         <button type="button" id="file-add" class="btn-secondary px-3">Add URL</button>
@@ -1721,14 +1747,22 @@ function extForMime(mime) {
   if (m.includes("png")) return "png";
   if (m.includes("gif")) return "gif";
   if (m.includes("webp")) return "webp";
-  return "png";
+  return "img";
+}
+
+function looksLikeImageFile(file) {
+  if (!file) return false;
+  if (String(file.type || "").startsWith("image/")) return true;
+  return /\.(jpe?g|png|gif|webp|avif)$/i.test(file.name || "");
 }
 
 function fileFromBlob(blob, mimeType = "") {
-  const type = blob.type || mimeType || "image/png";
-  if (blob instanceof File && blob.name && blob.type) return blob;
-  const ext = extForMime(type);
-  return new File([blob], `pasted-${Date.now()}.${ext}`, { type });
+  const type = blob.type || mimeType || "application/octet-stream";
+  const name =
+    blob instanceof File && blob.name
+      ? blob.name
+      : `pasted-${Date.now()}.${extForMime(type)}`;
+  return new File([blob], name, { type: type || "application/octet-stream" });
 }
 
 async function blobFromDataUrl(dataUrl) {
@@ -1736,30 +1770,62 @@ async function blobFromDataUrl(dataUrl) {
   return res.blob();
 }
 
+function imageFromHtml(html) {
+  const raw = String(html || "");
+  const match = raw.match(/<img[^>]+src=["'](data:image\/[^"']+)["']/i);
+  return match?.[1] || "";
+}
+
 /** @returns {Promise<{ blob: Blob, type: string } | null>} */
 async function readClipboardImage(dataTransfer) {
-  if (!dataTransfer) return null;
+  if (dataTransfer) {
+    for (const file of dataTransfer.files || []) {
+      if (looksLikeImageFile(file)) {
+        return { blob: file, type: file.type || "application/octet-stream" };
+      }
+    }
 
-  for (const file of dataTransfer.files || []) {
-    if (file.type.startsWith("image/")) {
-      return { blob: file, type: file.type };
+    for (const item of dataTransfer.items || []) {
+      if (item.kind === "file" && (item.type.startsWith("image/") || !item.type)) {
+        const blob = item.getAsFile();
+        if (blob && (looksLikeImageFile(blob) || item.type.startsWith("image/"))) {
+          return { blob, type: item.type || blob.type || "application/octet-stream" };
+        }
+      }
+    }
+
+    const text = dataTransfer.getData("text/plain")?.trim();
+    if (text?.startsWith("data:image/")) {
+      try {
+        const blob = await blobFromDataUrl(text);
+        if (blob.size) return { blob, type: blob.type || "application/octet-stream" };
+      } catch {
+        /* ignore bad data URL */
+      }
+    }
+
+    const fromHtml = imageFromHtml(dataTransfer.getData("text/html"));
+    if (fromHtml) {
+      try {
+        const blob = await blobFromDataUrl(fromHtml);
+        if (blob.size) return { blob, type: blob.type || "application/octet-stream" };
+      } catch {
+        /* ignore */
+      }
     }
   }
 
-  for (const item of dataTransfer.items || []) {
-    if (item.kind === "file" && item.type.startsWith("image/")) {
-      const blob = item.getAsFile();
-      if (blob) return { blob, type: item.type || blob.type || "image/png" };
-    }
-  }
-
-  const text = dataTransfer.getData("text/plain")?.trim();
-  if (text?.startsWith("data:image/")) {
+  if (navigator.clipboard?.read) {
     try {
-      const blob = await blobFromDataUrl(text);
-      if (blob.type.startsWith("image/")) return { blob, type: blob.type };
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const type = (item.types || []).find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        if (blob?.size) return { blob, type: blob.type || type };
+      }
     } catch {
-      /* ignore bad data URL */
+      /* permission or empty clipboard */
     }
   }
 
@@ -1782,14 +1848,19 @@ function bindMediaHandlers() {
 
   async function addMediaBlob(blob, mimeType = "") {
     if (uploading) return;
+    if (!blob || !blob.size) {
+      toast("That image was empty — try Browse, or copy the image again");
+      return;
+    }
     uploading = true;
     try {
       const file = fileFromBlob(blob, mimeType);
-      const { url, embedded } = await api.uploadOrEmbed(file);
+      const { url } = await api.upload(file);
+      if (!url) throw new Error("Upload did not return an image URL");
       await addMediaUrl(url);
-      toast(embedded ? "Image added (embedded)" : "Image added");
+      toast("Image saved");
     } catch (err) {
-      toast(err.message || "Could not add image");
+      toast(err.message || "Could not save image");
     } finally {
       uploading = false;
     }
@@ -1855,7 +1926,7 @@ function bindMediaHandlers() {
   mediaBlock?.addEventListener("drop", async (e) => {
     e.preventDefault();
     mediaBlock.classList.remove("border-accent", "bg-accent-soft/30");
-    const file = [...e.dataTransfer?.files || []].find((f) => f.type.startsWith("image/"));
+    const file = [...e.dataTransfer?.files || []].find((f) => looksLikeImageFile(f));
     if (file) await addMediaBlob(file, file.type);
   }, { signal });
 

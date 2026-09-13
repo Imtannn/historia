@@ -28,6 +28,14 @@ def resolve_db_path() -> Path:
     return path
 
 
+def resolve_upload_dir() -> Path:
+    """Keep images next to the database so Railway's /data volume persists them."""
+    explicit = os.getenv("UPLOAD_DIR", "").strip()
+    path = Path(explicit) if explicit else resolve_db_path().parent / "uploads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 DB_PATH = resolve_db_path()
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 

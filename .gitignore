@@ -6,6 +6,7 @@ historia.db
 .DS_Store
 app/static/uploads/*
 !app/static/uploads/.gitkeep
+uploads/
 *.egg-info/
 dist/
 build/

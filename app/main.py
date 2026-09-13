@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -49,8 +49,17 @@ def create_app() -> FastAPI:
         }
 
     from app.api import router as api_router
+    from app.api.upload import find_upload
 
     app.include_router(api_router, prefix="/api")
+
+    @app.get("/static/uploads/{name}")
+    def serve_upload(name: str) -> FileResponse:
+        """Serve uploaded images from the data volume (and the legacy static folder)."""
+        path = find_upload(name)
+        if path is None:
+            raise HTTPException(404, "Image not found")
+        return FileResponse(path)
 
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
