@@ -12,9 +12,6 @@ import {
   typeLabel,
   toast,
   compareByDateThenTitle,
-  effectiveEndYear,
-  rangesEnclosed,
-  storedToSignedYear,
 } from "../util.js";
 import { openEditEvent, openEditFigure, openEditPeriod, openEditPhase, openEditCountry, openAddPhase, openAddMilestone, openEditMilestone, openQuickAdd, openAddToTopic } from "../modal.js";
 
@@ -293,22 +290,8 @@ function mediaSectionHtml(attachments) {
     </section>`;
 }
 
-function eventFitsPhase(event, phase) {
-  const p0 = storedToSignedYear(phase?.date_start);
-  if (p0 == null) return false;
-  const p1 = effectiveEndYear(phase) ?? p0;
-  const e0 = storedToSignedYear(event?.date_start);
-  if (e0 == null) return false;
-  const e1 = effectiveEndYear(event) ?? e0;
-  if (!rangesEnclosed(e0, e1, p0, p1)) return false;
-  const want = new Set(formatCountryNames(phase).map((n) => n.toLowerCase()));
-  if (!want.size) return true;
-  return formatCountryNames(event).some((n) => want.has(n.toLowerCase()));
-}
-
 function duringTimeSectionHtml(items, { isPhase = false, countryNames = [] } = {}) {
-  if (!items?.length) return "";
-  const sorted = [...items].sort((a, b) =>
+  const sorted = [...(items || [])].sort((a, b) =>
     compareByDateThenTitle(a.entity, b.entity)
   );
   const countryLabel = (countryNames || []).join(", ");
@@ -317,6 +300,16 @@ function duringTimeSectionHtml(items, { isPhase = false, countryNames = [] } = {
       ? `Events tagged ${escapeHtml(countryLabel)} whose dates fall entirely within this phase.`
       : "Events whose dates fall entirely within this phase."
     : "All your other notes whose dates fall within this range — events, moments, figures, phases, and periods from anywhere in your library.";
+  if (!sorted.length) {
+    if (!isPhase) return "";
+    return `
+    <section class="mb-8 rounded-2xl border border-dashed border-paper-line p-6">
+      <h2 class="font-display text-xl mb-1">Events during this time</h2>
+      <p class="text-sm text-ink-muted mb-3">${blurb}</p>
+      <p class="text-sm text-ink-muted mb-3">None yet.</p>
+      <button type="button" id="phase-add-event-section" class="btn-primary text-sm px-3 py-1.5">Add event</button>
+    </section>`;
+  }
   return `
     <section class="mb-8">
       <h2 class="font-display text-xl mb-1">Events during this time</h2>
@@ -608,9 +601,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
           : "Library";
   const range = formatEntityRange(e) || formatDate(e.date_start);
   const related = { ...(data.related || {}) };
-  const eventItems = (related.event || []).filter((item) =>
-    isPhase ? eventFitsPhase(item.entity, e) : true
-  );
+  const eventItems = related.event || [];
   const phaseItems = related.phase || [];
   const periodItems = related.period || [];
   const countryNames = formatCountryNames(e);
@@ -754,12 +745,12 @@ function renderGenericHub(root, data, e, bodyHtml) {
     }
 
     ${
-      isPeriod || isPhase
+      isPeriod
         ? eventItems.length
           ? `<section class="mb-8">
               <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <h2 class="font-display text-xl">${isPhase ? "Events in this phase" : "Events in this period"}</h2>
-                <button type="button" id="${isPhase ? "phase-add-event-section" : "period-add-event-section"}" class="btn-secondary text-sm px-3 py-1.5">Add event</button>
+                <h2 class="font-display text-xl">Events in this period</h2>
+                <button type="button" id="period-add-event-section" class="btn-secondary text-sm px-3 py-1.5">Add event</button>
               </div>
               <div class="space-y-2">
                 ${eventItems
@@ -781,10 +772,12 @@ function renderGenericHub(root, data, e, bodyHtml) {
               </div>
             </section>`
           : `<section class="mb-8 rounded-2xl border border-dashed border-paper-line p-6">
-              <p class="text-sm text-ink-muted mb-3">No events in this ${isPhase ? "phase" : "period"} yet.</p>
-              <button type="button" id="${isPhase ? "phase-add-event-section" : "period-add-event-section"}" class="btn-primary text-sm px-3 py-1.5">Add event</button>
+              <p class="text-sm text-ink-muted mb-3">No events in this period yet.</p>
+              <button type="button" id="period-add-event-section" class="btn-primary text-sm px-3 py-1.5">Add event</button>
             </section>`
-        : groups.length
+        : isPhase
+          ? ""
+          : groups.length
           ? isTopic
             ? topicMemberSectionsHtml(topicRelated, groups)
             : groups

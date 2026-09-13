@@ -116,6 +116,11 @@ class EntityUpdate(SQLModel):
     link_relation: RelationType = RelationType.related_to
 
 
+class BulkCountryAssign(SQLModel):
+    entity_ids: list[str] = Field(default_factory=list)
+    country_name: str = Field(min_length=1, max_length=500)
+
+
 class EntityRead(EntityBase):
     id: str
     created_at: datetime
@@ -272,10 +277,10 @@ class ProgressUpdate(SQLModel):
 class ExportPayload(SQLModel):
     version: int = 1
     exported_at: datetime
-    entities: list[EntityRead]
-    links: list[LinkRead]
-    review_states: list[ReviewStateRead]
-    progress: ProgressRead
+    entities: list[EntityRead] = Field(default_factory=list)
+    links: list[LinkRead] = Field(default_factory=list)
+    review_states: list[ReviewStateRead] = Field(default_factory=list)
+    progress: Optional[ProgressRead] = None
 
 
 class ImportOptions(SQLModel):

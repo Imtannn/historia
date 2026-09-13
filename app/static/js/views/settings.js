@@ -2,7 +2,35 @@
 
 import { api } from "../api.js";
 import { toast, escapeHtml } from "../util.js";
+import { openDangerConfirm } from "../modal.js";
 import { syncProgressChrome } from "../progress-ui.js";
+
+function parseBackupJson(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("That file is not valid JSON.");
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Backup must be a JSON object.");
+  }
+  if (data.version !== 1) {
+    throw new Error(
+      data.version == null ? "Missing backup version." : `Unsupported backup version: ${data.version}`
+    );
+  }
+  if (!Array.isArray(data.entities) || !Array.isArray(data.links)) {
+    throw new Error("Backup is missing entities or links arrays.");
+  }
+  if (data.review_states != null && !Array.isArray(data.review_states)) {
+    throw new Error("review_states must be an array.");
+  }
+  if (data.progress != null && typeof data.progress !== "object") {
+    throw new Error("progress must be an object.");
+  }
+  return data;
+}
 
 export async function renderSettings(root) {
   const progress = await api.getProgress();
@@ -44,32 +72,23 @@ export async function renderSettings(root) {
     </section>
 
     <section class="rounded-2xl bg-white border border-paper-line p-6 shadow-soft mb-6 max-w-xl">
-      <h2 class="font-display text-xl mb-1">Backup</h2>
-      <p class="text-sm text-ink-muted mb-4">Export everything to JSON, or import a previous dump.</p>
-      <div class="flex flex-wrap gap-2 mb-4">
-        <button type="button" id="btn-export" class="btn-primary px-4 py-2">Export JSON</button>
-      </div>
-      <div class="border-t border-paper-line pt-4 space-y-3">
-        <label class="label" for="import-file">Import file</label>
+      <h2 class="font-display text-xl mb-1">Data management</h2>
+      <p class="text-sm text-ink-muted mb-4">Backup, restore, or wipe the entire library. Export before importing or resetting.</p>
+      <button type="button" id="btn-export" class="btn-primary px-4 py-2">Export all data</button>
+
+      <div class="border-t border-paper-line mt-5 pt-5 space-y-3">
+        <h3 class="font-semibold">Import data</h3>
+        <p class="text-sm text-ink-muted">Restores a previous backup. This overwrites everything currently in the app.</p>
+        <label class="label" for="import-file">JSON backup</label>
         <input id="import-file" type="file" accept="application/json,.json" class="block text-sm" />
-        <div class="flex items-center gap-4 text-sm">
-          <label class="inline-flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="import-mode" value="merge" checked />
-            Merge by id
-          </label>
-          <label class="inline-flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="import-mode" value="replace" />
-            Replace all
-          </label>
-        </div>
-        <button type="button" id="btn-import" class="btn-secondary px-4 py-2">Import</button>
+        <button type="button" id="btn-import" class="btn-secondary px-4 py-2">Import data</button>
       </div>
     </section>
 
     <section class="rounded-2xl border border-red-200 bg-red-50/50 p-6 max-w-xl">
       <h2 class="font-display text-xl mb-1 text-red-900">Danger zone</h2>
-      <p class="text-sm text-red-800/80 mb-4">Wipe deletes every entity, link, and review. Export first.</p>
-      <button type="button" id="btn-wipe" class="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold hover:bg-red-800">Wipe all data</button>
+      <p class="text-sm text-red-800/80 mb-4">Reset deletes every event, phase, period, country, topic, figure, and review, then restores a blank library with the built-in country list. Export first.</p>
+      <button type="button" id="btn-wipe" class="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold hover:bg-red-800">Reset / Clear all data</button>
     </section>
   `;
 
@@ -178,10 +197,10 @@ export async function renderSettings(root) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `historia-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `historia-backup-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      toast("Export downloaded");
+      toast("Backup downloaded");
     } catch (err) {
       toast(err.message);
     }
@@ -193,18 +212,26 @@ export async function renderSettings(root) {
       toast("Choose a JSON file first");
       return;
     }
-    const mode = document.querySelector('input[name="import-mode"]:checked').value;
-    if (mode === "replace" && !confirm("Replace will wipe current data, then import. Continue?")) {
+    if (!/\.json$/i.test(file.name || "")) {
+      toast("Please choose a .json backup file");
       return;
     }
-    if (mode === "merge" && !confirm("Merge will upsert entities by id. Continue?")) {
-      return;
-    }
+    let payload;
     try {
-      const text = await file.text();
-      const payload = JSON.parse(text);
-      const res = await api.import(mode, payload);
-      toast(`Imported ${res.entities} entities (${res.mode})`);
+      payload = parseBackupJson(await file.text());
+    } catch (err) {
+      toast(err.message || "Import failed — check the file");
+      return;
+    }
+    const ok = await openDangerConfirm({
+      title: "Overwrite entire database?",
+      body: "This will erase your current library and replace it with the backup. This cannot be undone.",
+      confirmLabel: "Overwrite and import",
+    });
+    if (!ok) return;
+    try {
+      const res = await api.import("replace", payload);
+      toast(`Restored ${res.entities} records`);
       location.hash = "/library";
     } catch (err) {
       toast(err.message || "Import failed — check the file");
@@ -212,11 +239,16 @@ export async function renderSettings(root) {
   });
 
   document.getElementById("btn-wipe").addEventListener("click", async () => {
-    if (!confirm("Really wipe ALL data? This cannot be undone.")) return;
-    if (!confirm("Last chance — wipe everything?")) return;
+    const ok = await openDangerConfirm({
+      title: "Reset all data?",
+      body: "This permanently deletes every record in the library. Type DELETE to continue.",
+      confirmLabel: "Reset all data",
+      requireTyped: "DELETE",
+    });
+    if (!ok) return;
     try {
       await api.wipe();
-      toast("Database wiped");
+      toast("Library reset to a blank state");
       location.hash = "/";
     } catch (err) {
       toast(err.message);

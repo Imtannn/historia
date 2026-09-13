@@ -2,7 +2,7 @@
 
 import { api } from "../api.js";
 import { escapeHtml, entityMatches, formatDate, formatEntityRange, formatCountryNames, formatSignedYear, composeDate, storedToSignedYear, toast, typeLabel, isImageUrl, bindYearInputs, presentYear } from "../util.js";
-import { openAddPhase, openAddTopic, openAddFigure, openAddCountry } from "../modal.js";
+import { openAddPhase, openAddTopic, openAddFigure, openAddCountry, openAssignCountry } from "../modal.js";
 
 const HUB_TABS = {
   periods: {
@@ -176,7 +176,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
     <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-4">
       <div>
         <h1 class="font-display text-3xl tracking-tight">Events</h1>
-        <p class="text-ink-muted mt-1">${filtered.length} event${filtered.length === 1 ? "" : "s"} · sorted by date · tick to group into a topic</p>
+        <p class="text-ink-muted mt-1">${filtered.length} event${filtered.length === 1 ? "" : "s"} · sorted by date · tick to group or assign a country</p>
       </div>
     </div>
 
@@ -213,6 +213,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
     <div id="group-bar" class="hidden sticky top-14 z-10 mb-3 rounded-xl bg-accent text-white px-4 py-3 flex flex-wrap items-center gap-3 shadow-soft">
       <span id="group-count" class="text-sm font-medium"></span>
       <button type="button" id="group-btn" class="ml-auto bg-white text-accent-dark font-semibold text-sm px-3 py-1.5 rounded-lg hover:bg-accent-soft">Group into topic…</button>
+      <button type="button" id="assign-country-btn" class="bg-white text-accent-dark font-semibold text-sm px-3 py-1.5 rounded-lg hover:bg-accent-soft">Assign to country…</button>
       <button type="button" id="group-clear" class="text-sm text-white/80 hover:text-white">Clear</button>
     </div>
 
@@ -237,7 +238,7 @@ export async function renderLibrary(root, { query = {} } = {}) {
                 const range = formatEntityRange(e) || formatDate(e.date_start);
                 return `
                 <div class="entity-row items-center !cursor-default" data-row="${e.id}">
-                  <label class="shrink-0 flex items-center p-1 cursor-pointer" title="Select for topic">
+                  <label class="shrink-0 flex items-center p-1 cursor-pointer" title="Select">
                     <input type="checkbox" class="event-check w-4 h-4 accent-[#C45C26]" data-id="${e.id}" />
                   </label>
                   <a href="#/entity/${e.id}" class="flex-1 min-w-0 no-underline text-inherit">
@@ -330,6 +331,17 @@ export async function renderLibrary(root, { query = {} } = {}) {
       preselectEventIds: [...selected],
       onSaved: (topic) => {
         location.hash = `/entity/${topic.id}`;
+      },
+    });
+  });
+
+  document.getElementById("assign-country-btn")?.addEventListener("click", () => {
+    if (selected.size === 0) return;
+    openAssignCountry({
+      entityIds: [...selected],
+      onSaved: () => {
+        selected.clear();
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
       },
     });
   });

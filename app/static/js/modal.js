@@ -3565,6 +3565,82 @@ export function bindModalChrome() {
   });
 }
 
+/**
+ * Destructive confirm. Resolves true only if the user confirms.
+ * When requireTyped is set (e.g. "DELETE"), Confirm stays disabled until the input matches.
+ */
+export function openDangerConfirm({
+  title,
+  body,
+  confirmLabel = "Confirm",
+  requireTyped = "",
+} = {}) {
+  const panel = document.getElementById("modal-panel");
+  if (!panel) return Promise.resolve(false);
+
+  const typed = String(requireTyped || "");
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl text-red-900">${escapeHtml(title || "Are you sure?")}</h2>
+        <p class="text-sm text-ink-muted mt-2 whitespace-pre-line">${escapeHtml(body || "")}</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    ${
+      typed
+        ? `<label class="label" for="danger-confirm-input">Type ${escapeHtml(typed)} to confirm</label>
+           <input id="danger-confirm-input" class="input mb-4" autocomplete="off" spellcheck="false" />`
+        : ""
+    }
+    <div class="flex justify-end gap-2 pt-1">
+      <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+      <button type="button" id="danger-confirm-btn" class="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed"${typed ? " disabled" : ""}>${escapeHtml(confirmLabel)}</button>
+    </div>
+  `;
+  openModal();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const root = document.getElementById("modal-root");
+    const onClick = (e) => {
+      if (e.target.matches("[data-close-modal]")) settle(false);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") settle(false);
+    };
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      root?.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+      closeModal();
+      resolve(ok);
+    };
+
+    const btn = document.getElementById("danger-confirm-btn");
+    const input = document.getElementById("danger-confirm-input");
+    btn?.addEventListener("click", () => {
+      if (typed && input?.value !== typed) return;
+      settle(true);
+    });
+    if (input) {
+      input.addEventListener("input", () => {
+        if (btn) btn.disabled = input.value !== typed;
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (!btn?.disabled) settle(true);
+        }
+      });
+      queueMicrotask(() => input.focus());
+    }
+    root?.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKey);
+  });
+}
+
 /** Add a moment (sub-point) under a parent event. */
 export async function openAddMilestone(parentEvent, { onSaved } = {}) {
   return openMilestoneForm({ parentEvent, onSaved });
@@ -3899,6 +3975,93 @@ export async function openAddToTopic(topic, { kind = "event", onSaved } = {}) {
     },
   });
   queueMicrotask(() => document.getElementById("topic-member-q")?.focus());
+}
+
+export async function openAssignCountry({ entityIds = [], onSaved } = {}) {
+  const ids = [...entityIds].filter(Boolean);
+  if (!ids.length) {
+    toast("Select events first");
+    return;
+  }
+
+  const panel = document.getElementById("modal-panel");
+  if (!panel) {
+    toast("Could not open form");
+    return;
+  }
+
+  await loadSavedCountries();
+  try {
+    const cat = await api.catalog();
+    catalog.countries = cat.countries || [];
+    catalog.empires = cat.empires || [];
+  } catch {
+    /* flags optional */
+  }
+
+  const countLabel = `${ids.length} event${ids.length === 1 ? "" : "s"}`;
+  panel.innerHTML = `
+    <div class="flex items-start justify-between mb-4">
+      <div>
+        <h2 class="font-display text-xl">Assign to country</h2>
+        <p class="text-sm text-ink-muted mt-0.5">${escapeHtml(countLabel)} will be tagged with this country.</p>
+      </div>
+      <button type="button" class="btn-ghost text-lg leading-none" data-close-modal aria-label="Close">×</button>
+    </div>
+    <form id="assign-country-form" class="space-y-4">
+      <div>
+        <label class="label" for="assign-country">Country</label>
+        <div class="relative">
+          <input id="assign-country" class="input pr-8" maxlength="500" placeholder="Search countries…" autocomplete="off" />
+          <span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-faint text-xs" aria-hidden="true">▾</span>
+        </div>
+        <div id="assign-country-catalog" class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-paper-line bg-paper-deep/30"></div>
+        <p class="text-xs text-ink-faint mt-1">Same list as Add event — pick one, or type a name to create it.</p>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" id="assign-country-submit" class="btn-primary px-5 py-2.5">Assign</button>
+      </div>
+    </form>
+  `;
+  openModal();
+  bindHubCountryCombobox({
+    inputId: "assign-country",
+    listId: "assign-country-catalog",
+    mode: "fill",
+    onPick: async (name) => {
+      const input = document.getElementById("assign-country");
+      if (input) input.value = name;
+    },
+  });
+  queueMicrotask(() => document.getElementById("assign-country")?.focus());
+
+  document.getElementById("assign-country-form")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const raw = document.getElementById("assign-country")?.value.trim();
+    if (!raw) {
+      toast("Pick a country");
+      document.getElementById("assign-country")?.focus();
+      return;
+    }
+    const btn = document.getElementById("assign-country-submit");
+    if (btn) btn.disabled = true;
+    try {
+      await ensurePlacesForNames([raw]);
+      const title = canonicalPlaceTitle(raw);
+      const result = await api.bulkAssignCountry({
+        entity_ids: ids,
+        country_name: title,
+      });
+      const n = result?.updated ?? ids.length;
+      toast(`Assigned ${n} event${n === 1 ? "" : "s"} to ${title}`);
+      closeModal();
+      if (onSaved) onSaved(result);
+    } catch (err) {
+      toast(err.message || "Could not assign country");
+      if (btn) btn.disabled = false;
+    }
+  });
 }
 
 export { closeModal };

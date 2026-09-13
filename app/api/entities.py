@@ -12,6 +12,7 @@ from app.dates import date_sort_key, effective_end_year, parse_historia_date
 from app.db import get_session
 from app.catalog import COUNTRIES, EMPIRES
 from app.models import (
+    BulkCountryAssign,
     Entity,
     EntityCreate,
     EntityRead,
@@ -604,6 +605,37 @@ def sync_country_places(session: Session = Depends(get_session)) -> dict:
             _sync_figure_country_link(session, figure)
     session.commit()
     return {"ok": True, "synced_events": len(events), "synced_figures": len(figures)}
+
+
+@router.post("/bulk-country")
+def bulk_assign_country(
+    payload: BulkCountryAssign,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Set the same country on many events (replaces each event’s current country list)."""
+    ids = [str(eid).strip() for eid in (payload.entity_ids or []) if str(eid).strip()]
+    if not ids:
+        raise HTTPException(400, "Select at least one event")
+    name = (payload.country_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Pick a country")
+    place = _ensure_place(session, name)
+    title = place.title
+    updated = 0
+    skipped = 0
+    for eid in ids:
+        entity = session.get(Entity, eid)
+        if entity is None or entity.type != EntityType.event:
+            skipped += 1
+            continue
+        entity.country_names = [title]
+        entity.country_name = title
+        entity.updated_at = utcnow()
+        session.add(entity)
+        _sync_event_country_links(session, entity)
+        updated += 1
+    session.commit()
+    return {"ok": True, "updated": updated, "skipped": skipped, "country_name": title}
 
 
 @router.patch("/{entity_id}/topic-member-order", response_model=dict)

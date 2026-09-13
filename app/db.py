@@ -122,13 +122,24 @@ def get_session():
         yield session
 
 
-def wipe_all(session: Session) -> None:
-    """Delete all rows and re-seed the Progress row."""
+def clear_all_rows(session: Session) -> None:
+    """Delete every row. Does not commit. Callers must commit or rollback."""
+    from sqlalchemy import delete as sa_delete
+
     from app.models import Entity, Link, ReviewState
 
-    for model in (Link, ReviewState, Entity, Progress):
-        for row in session.exec(select(model)).all():
-            session.delete(row)
+    session.execute(sa_delete(Link))
+    session.execute(sa_delete(ReviewState))
+    session.execute(sa_delete(Entity))
+    session.execute(sa_delete(Progress))
+    session.flush()
+    session.expunge_all()
+
+
+def wipe_all(session: Session, *, commit: bool = True) -> None:
+    """Delete all rows and re-seed Progress plus the built-in country list."""
+    clear_all_rows(session)
     session.add(Progress(id=1))
     ensure_world_countries(session)
-    session.commit()
+    if commit:
+        session.commit()
