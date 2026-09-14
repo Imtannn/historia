@@ -4,6 +4,7 @@ import { api } from "./api.js";
 import { route, startRouter } from "./router.js";
 import { bindModalChrome, openQuickAdd } from "./modal.js";
 import { toast } from "./util.js";
+import { bindGalleryScrollMemory } from "./scroll-memory.js";
 import { syncProgressChrome } from "./progress-ui.js";
 import { renderHome } from "./views/home.js";
 import { renderLibrary } from "./views/library.js";
@@ -68,6 +69,7 @@ route("/quiz", ({ root }) => renderQuiz(root));
 route("/settings", ({ root }) => renderSettings(root));
 
 bindShell();
+bindGalleryScrollMemory();
 refreshHeader();
 
 api.health().then((h) => {

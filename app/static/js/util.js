@@ -115,13 +115,16 @@ export function parseDate(value) {
   if (!value) return null;
   const raw = String(value).trim();
   if (!raw) return null;
+  // Signed ISO (`-0100-07-12`) first so padded BC years are never read as "BC"/"AC" suffixes.
+  const isoLike = /^-?\d{1,8}(?:-\d{1,2}){0,2}$/.test(raw);
   const upper = raw.toUpperCase().replace(/\s+/g, "");
   if (
-    upper.endsWith("BCE") ||
-    upper.endsWith("BC") ||
-    upper.endsWith("AC") ||
-    upper.endsWith("CE") ||
-    upper.endsWith("AD")
+    !isoLike &&
+    (upper.endsWith("BCE") ||
+      upper.endsWith("BC") ||
+      upper.endsWith("AC") ||
+      upper.endsWith("CE") ||
+      upper.endsWith("AD"))
   ) {
     const digits = upper.replace(/\D/g, "");
     if (!digits) return null;
@@ -144,10 +147,33 @@ export function parseDate(value) {
   }
 }
 
+/**
+ * Unified chronology field:
+ * - Figures → birth (`date_start`)
+ * - Events / Moments → start (`date_start`; moments may inherit a parent start)
+ * Never compare padded ISO strings: "-0055" < "-0100" lexicographically, but 100 BC precedes 55 BC.
+ */
+export function entitySortDate(entity, parent = null) {
+  if (!entity) return null;
+  if (entity.type === "figure") return entity.date_start || entity.reign_start || null;
+  if (entity.type === "milestone") return entity.date_start || parent?.date_start || null;
+  return entity.date_start || null;
+}
+
 export function dateSortKey(value) {
+  // Dated items first, oldest → newest. Signed years: 100 BC (-100) before 55 BC (-55), then AC.
   const p = parseDate(value);
   if (!p) return [1, 0, 0, 0];
   return [0, p.year, p.month, p.day];
+}
+
+export function compareSortDates(aValue, bValue) {
+  const ka = dateSortKey(aValue);
+  const kb = dateSortKey(bValue);
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+  }
+  return 0;
 }
 
 export function formatDate(value) {
@@ -312,11 +338,32 @@ export function relationLabel(rel) {
   return String(rel || "related").replace(/_/g, " ");
 }
 
+/** Period → phase → event → moment → figure when start dates match. */
+export const TIMELINE_TYPE_RANK = {
+  period: 0,
+  phase: 1,
+  event: 2,
+  milestone: 3,
+  figure: 4,
+};
+
 export function compareByDateThenTitle(a, b) {
   const ka = dateSortKey(a?.date_start);
   const kb = dateSortKey(b?.date_start);
   for (let i = 0; i < ka.length; i++) {
     if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
   }
+  return String(a?.title || "").localeCompare(String(b?.title || ""));
+}
+
+export function compareByDateThenTypeThenTitle(a, b) {
+  const ka = dateSortKey(a?.date_start);
+  const kb = dateSortKey(b?.date_start);
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+  }
+  const ra = TIMELINE_TYPE_RANK[a?.type] ?? 50;
+  const rb = TIMELINE_TYPE_RANK[b?.type] ?? 50;
+  if (ra !== rb) return ra - rb;
   return String(a?.title || "").localeCompare(String(b?.title || ""));
 }

@@ -54,6 +54,11 @@ export const api = {
   createEntity: (body) => request("/entities", { method: "POST", body: JSON.stringify(body) }),
   updateEntity: (id, body) => request(`/entities/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   bulkAssignCountry: (body) => request(`/entities/bulk-country`, { method: "POST", body: JSON.stringify(body) }),
+  bulkDelete: (entityIds) =>
+    request(`/entities/bulk-delete`, {
+      method: "POST",
+      body: JSON.stringify({ entity_ids: entityIds }),
+    }),
   syncCountryPlaces: () => request("/entities/sync-country-places", { method: "POST" }),
   deleteEntity: (id) => request(`/entities/${id}`, { method: "DELETE" }),
   listLinks: (entityId) => request(`/links${entityId ? `?entity_id=${entityId}` : ""}`),

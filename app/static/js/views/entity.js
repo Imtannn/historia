@@ -57,6 +57,30 @@ function eraCoversEntity(era, entity) {
   return itemCountries.some((c) => eraCountries.includes(c));
 }
 
+function itemCountryNames(item) {
+  const fromEntity = formatCountryNames(item?.entity);
+  if (fromEntity.length) return fromEntity;
+  return formatCountryNames(item?.parent);
+}
+
+/** Phase events list: entire span inside the phase, then either/or country. */
+function phaseContainsEvent(phase, item) {
+  const entity = item?.entity;
+  if (!entity || (entity.type !== "event" && entity.type !== "milestone")) return false;
+  const outer0 = storedToSignedYear(phase?.date_start);
+  if (outer0 == null) return false;
+  const outer1 = effectiveEndYear(phase) ?? outer0;
+  const inner0 = storedToSignedYear(entity.date_start);
+  if (inner0 == null) return false;
+  const inner1 = effectiveEndYear(entity) ?? inner0;
+  if (!rangesEnclosed(inner0, inner1, outer0, outer1)) return false;
+  const want = formatCountryNames(phase).map((n) => n.toLowerCase());
+  if (!want.length) return true;
+  const have = itemCountryNames(item).map((n) => n.toLowerCase());
+  if (!have.length) return false;
+  return have.some((c) => want.includes(c));
+}
+
 const TOPIC_REORDER_KINDS = new Set(["event", "phase", "figure", "milestone"]);
 const TOPIC_ORDER_RE = /<!--\s*historia-order:\s*(\{[\s\S]*?\})\s*-->/;
 
@@ -309,8 +333,11 @@ function mediaSectionHtml(attachments) {
     </section>`;
 }
 
-function duringTimeSectionHtml(items, { isPhase = false, countryNames = [] } = {}) {
-  const sorted = [...(items || [])].sort((a, b) =>
+function duringTimeSectionHtml(items, { isPhase = false, countryNames = [], phase = null } = {}) {
+  const filtered = isPhase && phase
+    ? (items || []).filter((item) => phaseContainsEvent(phase, item))
+    : items || [];
+  const sorted = [...filtered].sort((a, b) =>
     compareByDateThenTitle(a.entity, b.entity)
   );
   const countryLabel = (countryNames || []).join(", ");
@@ -637,6 +664,8 @@ function renderGenericHub(root, data, e, bodyHtml) {
   }
   if (isPeriod) delete related.phase;
   if (isPhase) delete related.period;
+  const topicItems = isPhase ? related.topic || [] : [];
+  if (isPhase) delete related.topic;
   const topicRelated = isTopic ? orderedTopicRelated(related, e.body) : related;
   const groups = groupList(isTopic ? topicRelated : related);
   const attachments = e.attachments || [];
@@ -644,7 +673,7 @@ function renderGenericHub(root, data, e, bodyHtml) {
     ? periodItems
         .map((item) => {
           const ent = item.entity;
-          return `<a href="#/entity/${ent.id}" class="type-badge no-underline normal-case tracking-normal font-medium hover:text-accent">${escapeHtml(ent.title)}</a>`;
+          return `<a href="#/entity/${ent.id}" class="era-chip no-underline">${escapeHtml(ent.title)}</a>`;
         })
         .join("")
     : "";
@@ -856,14 +885,38 @@ function renderGenericHub(root, data, e, bodyHtml) {
             </section>`
     }
 
-    ${duringTimeSectionHtml(data.during_time, { isPhase, countryNames })}
+    ${duringTimeSectionHtml(data.during_time, { isPhase, countryNames, phase: isPhase ? e : null })}
 
     ${
-      isPeriod || isPhase
+      isPhase && topicItems.length
+        ? `<section class="mb-8">
+            <h2 class="font-display text-xl mb-3">Topics</h2>
+            <div class="space-y-2">
+              ${topicItems
+                .map((item) => {
+                  const ent = item.entity;
+                  return `
+                  <a href="#/entity/${ent.id}" class="entity-row no-underline text-inherit">
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-medium">${escapeHtml(ent.title)}</span>
+                        <span class="type-badge">${typeLabel(ent.type)}</span>
+                      </div>
+                    </div>
+                  </a>`;
+                })
+                .join("")}
+            </div>
+          </section>`
+        : ""
+    }
+
+    ${
+      isPeriod
         ? groups
             .map((key) => {
               const items = related[key];
-              if (isPhase && key === "topic" && !items?.length) return "";
+              if (!items?.length) return "";
               return `
               <section class="mb-8">
                 <h2 class="font-display text-xl mb-3">${groupTitle(key)}</h2>

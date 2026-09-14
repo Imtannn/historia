@@ -121,6 +121,10 @@ class BulkCountryAssign(SQLModel):
     country_name: str = Field(min_length=1, max_length=500)
 
 
+class BulkEntityIds(SQLModel):
+    entity_ids: list[str] = Field(default_factory=list)
+
+
 class EntityRead(EntityBase):
     id: str
     created_at: datetime
@@ -281,6 +285,9 @@ class ExportPayload(SQLModel):
     links: list[LinkRead] = Field(default_factory=list)
     review_states: list[ReviewStateRead] = Field(default_factory=list)
     progress: Optional[ProgressRead] = None
+    # filename -> base64 bytes for /static/uploads/* (PNG/JPEG/GIF/WebP)
+    files: dict[str, str] = Field(default_factory=dict)
+    files_missing: int = 0
 
 
 class ImportOptions(SQLModel):

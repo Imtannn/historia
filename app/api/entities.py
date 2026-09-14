@@ -13,6 +13,7 @@ from app.db import get_session
 from app.catalog import COUNTRIES, EMPIRES
 from app.models import (
     BulkCountryAssign,
+    BulkEntityIds,
     Entity,
     EntityCreate,
     EntityRead,
@@ -181,6 +182,21 @@ def _year_range(entity: Entity) -> Optional[tuple[int, int]]:
     return (min(y0, y1), max(y0, y1))
 
 
+def _strict_year_span(entity: Entity) -> Optional[tuple[int, int]]:
+    """Inclusive [start, end] for enclosure. Start is required.
+
+    Missing end (and not ongoing) is a point at start — a single-year event.
+    Ongoing uses the present year as the end.
+    """
+    y0 = _signed_year(entity.date_start)
+    if y0 is None:
+        return None
+    y1 = effective_end_year(entity.date_end, bool(getattr(entity, "ongoing", False)))
+    if y1 is None:
+        y1 = y0
+    return (min(y0, y1), max(y0, y1))
+
+
 def _year_range_from_dates(
     date_start: Optional[str],
     date_end: Optional[str],
@@ -228,6 +244,20 @@ def _entity_country_keys(entity: Entity) -> set[str]:
     }
 
 
+def _linked_place_keys(session: Session, entity_id: str) -> set[str]:
+    """Country titles linked via occurred_in / involves / related place rows."""
+    keys: set[str] = set()
+    links = session.exec(select(Link).where(Link.source_id == entity_id)).all()
+    for link in links:
+        target = session.get(Entity, link.target_id)
+        if target is None or target.type != EntityType.place:
+            continue
+        title = (target.title or "").strip()
+        if title:
+            keys.add(title.lower())
+    return keys
+
+
 _DURING_TIME_TYPES = (
     EntityType.event,
     EntityType.milestone,
@@ -241,29 +271,39 @@ _COVERED_TYPES = (EntityType.event, EntityType.milestone)
 
 def _country_keys_for_match(session: Session, entity: Entity) -> set[str]:
     """Country tags used when locating an item in a phase/period. Moments inherit from their event."""
-    keys = _entity_country_keys(entity)
+    keys = _entity_country_keys(entity) | _linked_place_keys(session, entity.id)
     if keys or entity.type != EntityType.milestone or not entity.parent_id:
         return keys
     parent = session.get(Entity, entity.parent_id)
-    return _entity_country_keys(parent) if parent else set()
+    if parent is None:
+        return set()
+    return _entity_country_keys(parent) | _linked_place_keys(session, parent.id)
+
+
+def _container_country_keys(session: Session, container: Entity) -> set[str]:
+    return _entity_country_keys(container) | _linked_place_keys(session, container.id)
 
 
 def _collect_enclosed_events_and_milestones(
     session: Session,
     container: Entity,
 ) -> list[dict]:
-    """Events and moments whose dates lie entirely inside this phase/period.
+    """Events and moments strictly inside this phase/period.
 
-    Country on the container is optional: if set, the item must share that country
-    (moments use the parent event's countries). Linked items are included — they
-    must not be skipped just because they also appear in `related`.
+    Time: Event.start >= container.start AND Event.end <= container.end
+    (missing event end is treated as a point at start). Partial overlaps
+    are excluded — an event that begins before or ends after is out.
+
+    Country is either/or: if the container has a country, the item must be
+    tagged with that country; if it has none, every enclosed event is included.
+    Linked part_of rows are not a shortcut around these rules.
     """
-    container_range = _year_range(container)
+    container_range = _strict_year_span(container)
     if container_range is None:
         return []
 
     skip: set[str] = {container.id}
-    want_countries = _entity_country_keys(container)
+    want_countries = _container_country_keys(session, container)
     rows = list(
         session.exec(select(Entity).where(Entity.type.in_(_COVERED_TYPES))).all()  # type: ignore[attr-defined]
     )
@@ -272,11 +312,16 @@ def _collect_enclosed_events_and_milestones(
     for other in rows:
         if other.id in skip:
             continue
-        other_range = _year_range(other)
-        if other_range is None or not _range_enclosed(other_range, container_range):
+        other_range = _strict_year_span(other)
+        if other_range is None:
             continue
-        if want_countries and not (_country_keys_for_match(session, other) & want_countries):
+        # Event.start >= Phase.start AND Event.end <= Phase.end
+        if not _range_enclosed(other_range, container_range):
             continue
+        if want_countries:
+            item_countries = _country_keys_for_match(session, other)
+            if not (item_countries & want_countries):
+                continue
         parent = None
         if other.type == EntityType.milestone and other.parent_id:
             p = session.get(Entity, other.parent_id)
@@ -655,6 +700,63 @@ def bulk_assign_country(
     return {"ok": True, "updated": updated, "skipped": skipped, "country_name": title}
 
 
+def _purge_entity(session: Session, entity: Entity) -> None:
+    """Remove an entity, its links, and review state. Caller commits."""
+    if entity.type == EntityType.place:
+        _strip_country_references(session, entity)
+
+    links = session.exec(
+        select(Link).where((Link.source_id == entity.id) | (Link.target_id == entity.id))
+    ).all()
+    for link in links:
+        session.delete(link)
+
+    rs = session.get(ReviewState, entity.id)
+    if rs:
+        session.delete(rs)
+
+    children = session.exec(select(Entity).where(Entity.parent_id == entity.id)).all()
+    for child in children:
+        child.parent_id = None
+        session.add(child)
+
+    session.delete(entity)
+
+
+@router.post("/bulk-delete")
+def bulk_delete_entities(
+    payload: BulkEntityIds,
+    session: Session = Depends(get_session),
+) -> dict:
+    ids = [str(eid).strip() for eid in (payload.entity_ids or []) if str(eid).strip()]
+    if not ids:
+        raise HTTPException(400, "Select at least one item")
+    # Stable unique order so a parent is removed before a later duplicate id.
+    seen: set[str] = set()
+    unique_ids: list[str] = []
+    for eid in ids:
+        if eid in seen:
+            continue
+        seen.add(eid)
+        unique_ids.append(eid)
+
+    deleted = 0
+    skipped = 0
+    try:
+        for eid in unique_ids:
+            entity = session.get(Entity, eid)
+            if entity is None:
+                skipped += 1
+                continue
+            _purge_entity(session, entity)
+            deleted += 1
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
+
+
 @router.patch("/{entity_id}/topic-member-order", response_model=dict)
 def reorder_topic_members_via_entity(
     entity_id: str,
@@ -819,28 +921,7 @@ def delete_entity(entity_id: str, session: Session = Depends(get_session)) -> No
     entity = session.get(Entity, entity_id)
     if not entity:
         raise HTTPException(404, "Entity not found")
-
-    if entity.type == EntityType.place:
-        _strip_country_references(session, entity)
-
-    # Remove links involving this entity
-    links = session.exec(
-        select(Link).where((Link.source_id == entity_id) | (Link.target_id == entity_id))
-    ).all()
-    for link in links:
-        session.delete(link)
-
-    rs = session.get(ReviewState, entity_id)
-    if rs:
-        session.delete(rs)
-
-    # Clear parent refs pointing here
-    children = session.exec(select(Entity).where(Entity.parent_id == entity_id)).all()
-    for child in children:
-        child.parent_id = None
-        session.add(child)
-
-    session.delete(entity)
+    _purge_entity(session, entity)
     session.commit()
 
 

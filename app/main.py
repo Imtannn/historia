@@ -31,7 +31,10 @@ class NoCacheStaticMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/static/js/") or path.startswith("/static/css/"):
-            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            response.headers["Cache-Control"] = "no-store"
+        elif path.startswith("/static/uploads/") and response.status_code >= 400:
+            # Import restore writes files at the same URL; never keep a 404 in cache.
+            response.headers["Cache-Control"] = "no-store"
         return response
 
 
@@ -58,8 +61,12 @@ def create_app() -> FastAPI:
         """Serve uploaded images from the data volume (and the legacy static folder)."""
         path = find_upload(name)
         if path is None:
-            raise HTTPException(404, "Image not found")
-        return FileResponse(path)
+            raise HTTPException(
+                status_code=404,
+                detail="Image not found",
+                headers={"Cache-Control": "no-store"},
+            )
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 

@@ -29,7 +29,26 @@ function parseBackupJson(text) {
   if (data.progress != null && typeof data.progress !== "object") {
     throw new Error("progress must be an object.");
   }
+  if (data.files == null) {
+    data.files = {};
+  } else if (typeof data.files !== "object" || Array.isArray(data.files)) {
+    throw new Error("Backup files must be an object of image names to data.");
+  }
   return data;
+}
+
+function backupImageCount(payload) {
+  return Object.keys(payload?.files || {}).length;
+}
+
+function backupNeedsImages(payload) {
+  for (const entity of payload?.entities || []) {
+    for (const url of entity.attachments || []) {
+      const s = String(url || "");
+      if (s.includes("/static/uploads/") || s.startsWith("data:image/")) return true;
+    }
+  }
+  return false;
 }
 
 export async function renderSettings(root) {
@@ -73,12 +92,12 @@ export async function renderSettings(root) {
 
     <section class="rounded-2xl bg-white border border-paper-line p-6 shadow-soft mb-6 max-w-xl">
       <h2 class="font-display text-xl mb-1">Data management</h2>
-      <p class="text-sm text-ink-muted mb-4">Backup, restore, or wipe the entire library. Export before importing or resetting.</p>
+      <p class="text-sm text-ink-muted mb-4">Backup, restore, or wipe the entire library. Export includes attached images, and is the only way to move pictures between computers.</p>
       <button type="button" id="btn-export" class="btn-primary px-4 py-2">Export all data</button>
 
       <div class="border-t border-paper-line mt-5 pt-5 space-y-3">
         <h3 class="font-semibold">Import data</h3>
-        <p class="text-sm text-ink-muted">Restores a previous backup. This overwrites everything currently in the app.</p>
+        <p class="text-sm text-ink-muted">Restores a previous backup, including pictures if they were saved in the file. This overwrites everything currently in the app. Older backups that only have JSON (no image data) cannot restore Gallery photos.</p>
         <label class="label" for="import-file">JSON backup</label>
         <input id="import-file" type="file" accept="application/json,.json" class="block text-sm" />
         <button type="button" id="btn-import" class="btn-secondary px-4 py-2">Import data</button>
@@ -193,14 +212,20 @@ export async function renderSettings(root) {
   document.getElementById("btn-export").addEventListener("click", async () => {
     try {
       const data = await api.export();
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `historia-backup-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      toast("Backup downloaded");
+      const n = backupImageCount(data);
+      const missing = Number(data.files_missing) || 0;
+      if (missing) {
+        toast(`Backup downloaded with ${n} image${n === 1 ? "" : "s"} (${missing} missing from disk)`);
+      } else {
+        toast(n ? `Backup downloaded with ${n} image${n === 1 ? "" : "s"}` : "Backup downloaded");
+      }
     } catch (err) {
       toast(err.message);
     }
@@ -223,15 +248,24 @@ export async function renderSettings(root) {
       toast(err.message || "Import failed — check the file");
       return;
     }
+    const imageCount = backupImageCount(payload);
+    const warnImages = backupNeedsImages(payload) && imageCount === 0;
     const ok = await openDangerConfirm({
       title: "Overwrite entire database?",
-      body: "This will erase your current library and replace it with the backup. This cannot be undone.",
+      body: warnImages
+        ? "This will erase your current library and replace it with the backup. This backup has no image files, so Gallery pictures will stay broken unless the PNGs are already on this server."
+        : "This will erase your current library and replace it with the backup. This cannot be undone.",
       confirmLabel: "Overwrite and import",
     });
     if (!ok) return;
     try {
       const res = await api.import("replace", payload);
-      toast(`Restored ${res.entities} records`);
+      const files = Number(res.files) || 0;
+      const missing = Number(res.files_missing) || 0;
+      let msg = `Restored ${res.entities} records`;
+      if (files) msg += ` · ${files} image${files === 1 ? "" : "s"}`;
+      if (missing) msg += ` · ${missing} picture${missing === 1 ? "" : "s"} missing`;
+      toast(msg);
       location.hash = "/library";
     } catch (err) {
       toast(err.message || "Import failed — check the file");

@@ -121,7 +121,7 @@ def parse_historia_date(value: Optional[str]) -> Optional[tuple[int, int, int]]:
 
 
 def date_sort_key(value: Optional[str]) -> tuple:
-    """Dated items first (chronological); missing/unparseable dates sort to the end."""
+    """Oldest → newest. BC years are negative, so 3,000 BC precedes 44 BC, then AC years ascend."""
     parsed = parse_historia_date(value)
     if parsed is None:
         return (1, 0, 0, 0)
